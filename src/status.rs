@@ -10,7 +10,14 @@ pub fn run(project: &Project) -> Result<()> {
 
     println!("Project: {}", project.name);
     println!("Repo:    {}", project.config.repo.display());
-    println!("Branch:  {}", if branch.is_empty() { "(detached)" } else { &branch });
+    println!(
+        "Branch:  {}",
+        if branch.is_empty() {
+            "(detached)"
+        } else {
+            &branch
+        }
+    );
     println!("HEAD:    {head}");
 
     match &state.current {
@@ -21,10 +28,7 @@ pub fn run(project: &Project) -> Result<()> {
         Some(release) => println!("Previous: {} ({})", release.revision, release.tag),
         None => println!("Previous: none"),
     }
-    println!(
-        "Env tag: {}",
-        env_tag.as_deref().unwrap_or("not set")
-    );
+    println!("Env tag: {}", env_tag.as_deref().unwrap_or("not set"));
 
     println!();
     println!("Docker Compose:");
