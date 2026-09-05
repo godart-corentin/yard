@@ -12,9 +12,7 @@ pub fn wait(config: &DeploymentConfig) -> Result<()> {
         return Ok(());
     };
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
 
     for attempt in 1..=config.health_attempts {
         match client.get(url).send() {
@@ -37,4 +35,3 @@ pub fn wait(config: &DeploymentConfig) -> Result<()> {
 
     Err(YardError::HealthCheck(url.clone()))
 }
-
