@@ -126,12 +126,13 @@ impl Project {
     pub fn compose_build(&self, tag: &str) -> Result<()> {
         let mut args = self.compose_args();
         args.extend(["build".to_owned(), self.config.compose.service.clone()]);
-        command::inherit(
+        command::checked(
             "docker",
             &args,
             Some(&self.config.compose.directory),
             &self.tag_env(tag),
-        )
+        )?;
+        Ok(())
     }
 
     pub fn compose_migrate(&self, tag: &str) -> Result<()> {
@@ -144,12 +145,13 @@ impl Project {
             "--rm".to_owned(),
             service.clone(),
         ]);
-        command::inherit(
+        command::checked(
             "docker",
             &args,
             Some(&self.config.compose.directory),
             &self.tag_env(tag),
-        )
+        )?;
+        Ok(())
     }
 
     pub fn compose_up(&self, tag: &str) -> Result<()> {
@@ -161,12 +163,13 @@ impl Project {
             "--no-deps".to_owned(),
             self.config.compose.service.clone(),
         ]);
-        command::inherit(
+        command::checked(
             "docker",
             &args,
             Some(&self.config.compose.directory),
             &self.tag_env(tag),
-        )
+        )?;
+        Ok(())
     }
 
     pub fn compose_ps(&self) -> Result<String> {
