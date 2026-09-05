@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::command;
 use crate::config::ProjectConfig;
@@ -162,7 +163,7 @@ impl Project {
 
     pub fn compose_ps(&self) -> Result<String> {
         let mut args = self.compose_args();
-        args.push("ps".to_owned());
+        args.extend(["ps".to_owned(), "--format".to_owned(), "json".to_owned()]);
         command::checked("docker", &args, Some(&self.config.compose.directory), &[])
     }
 
@@ -185,6 +186,45 @@ impl Project {
             .split_first()
             .ok_or_else(|| YardError::Config("backup.command is empty".into()))?;
         command::inherit(program, args, Some(&self.config.repo), &[])
+    }
+
+    pub fn last_backup(&self) -> Result<Option<(PathBuf, SystemTime)>> {
+        let Some(backup) = &self.config.backup else {
+            return Ok(None);
+        };
+        let Some(directory) = &backup.directory else {
+            return Ok(None);
+        };
+
+        let extension = backup
+            .extension
+            .as_deref()
+            .map(|value| value.trim_start_matches('.'));
+        let mut latest: Option<(PathBuf, SystemTime)> = None;
+
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = entry.metadata()?;
+            if !metadata.is_file() {
+                continue;
+            }
+            if let Some(extension) = extension {
+                if path.extension().and_then(|value| value.to_str()) != Some(extension) {
+                    continue;
+                }
+            }
+
+            let modified = metadata.modified()?;
+            let should_replace = latest
+                .as_ref()
+                .is_none_or(|(_, current)| modified > *current);
+            if should_replace {
+                latest = Some((path, modified));
+            }
+        }
+
+        Ok(latest)
     }
 
     fn git_checked(&self, args: &[&str]) -> Result<String> {
