@@ -72,7 +72,6 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -110,7 +109,10 @@ mod tests {
         let path = temp_file();
         fs::write(&path, "FOO=one\n").unwrap();
         set(&path, "APP_IMAGE_TAG", "abc123").unwrap();
-        assert_eq!(get(&path, "APP_IMAGE_TAG").unwrap().as_deref(), Some("abc123"));
+        assert_eq!(
+            get(&path, "APP_IMAGE_TAG").unwrap().as_deref(),
+            Some("abc123")
+        );
         let _ = fs::remove_file(path);
     }
 }
