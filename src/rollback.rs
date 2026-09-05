@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::error::{Result, YardError};
 use crate::health;
@@ -28,17 +28,28 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     }
 
     println!("Rolling back {}", project.name);
-    println!("  from: {}", current.revision);
-    println!("    to: {}", target.revision);
+    println!(
+        "  from: {} ({})",
+        Project::tag_for_revision(&current.revision),
+        current.tag
+    );
+    println!(
+        "    to: {} ({})",
+        Project::tag_for_revision(&target.revision),
+        target.tag
+    );
+    println!();
 
-    info!(project = %project.name, "running pre-rollback backup");
     project.run_backup()?;
+    println!("✓ Backup");
 
     project.persist_tag(&target.tag)?;
 
     let activation = (|| -> Result<()> {
         project.compose_up(&target.tag)?;
+        println!("✓ Activate");
         health::wait(&project.config.deployment)?;
+        println!("✓ Health check");
         Ok(())
     })();
 
@@ -60,7 +71,8 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     state.current = Some(target.clone());
     state.save(&project.state_path)?;
 
-    println!("Healthy: {} @ {}", project.name, target.revision);
+    println!();
+    println!("Healthy: {} @ {}", project.name, target.tag);
     Ok(())
 }
 
