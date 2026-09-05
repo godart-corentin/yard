@@ -16,11 +16,11 @@ pub fn run(project: &Project) -> Result<()> {
         .filter(|tag| !tag.trim().is_empty())
         .unwrap_or_else(|| Project::tag_for_revision(&old_revision));
 
-    project.run_backup()?;
-    println!("✓ Backup");
-
     project.update_branch()?;
     println!("✓ Git update");
+
+    project.run_backup()?;
+    println!("✓ Backup");
 
     let new_revision = project.head_revision()?;
     let new_tag = Project::tag_for_revision(&new_revision);
