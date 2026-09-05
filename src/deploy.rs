@@ -1,4 +1,4 @@
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::error::Result;
 use crate::health;
@@ -16,24 +16,36 @@ pub fn run(project: &Project) -> Result<()> {
         .filter(|tag| !tag.trim().is_empty())
         .unwrap_or_else(|| Project::tag_for_revision(&old_revision));
 
-    info!(project = %project.name, "running pre-deploy backup");
     project.run_backup()?;
+    println!("✓ Backup");
 
-    info!(project = %project.name, branch = %project.config.branch, "updating repository");
     project.update_branch()?;
+    println!("✓ Git update");
 
     let new_revision = project.head_revision()?;
     let new_tag = Project::tag_for_revision(&new_revision);
 
+    println!();
     println!("Deploying {}", project.name);
-    println!("  from: {}", old_revision);
-    println!("    to: {}", new_revision);
+    println!(
+        "  from: {} ({})",
+        Project::tag_for_revision(&old_revision),
+        old_tag
+    );
+    println!(
+        "    to: {} ({})",
+        Project::tag_for_revision(&new_revision),
+        new_tag
+    );
+    println!();
 
-    info!(image = %project.image_ref(&new_tag), "building image");
     project.compose_build(&new_tag)?;
+    println!("✓ Build");
 
-    info!(project = %project.name, "running migrations");
     project.compose_migrate(&new_tag)?;
+    if project.config.deployment.migration_service.is_some() {
+        println!("✓ Migrations");
+    }
 
     let old_release = state
         .current
@@ -43,9 +55,10 @@ pub fn run(project: &Project) -> Result<()> {
     project.persist_tag(&new_tag)?;
 
     let activation = (|| -> Result<()> {
-        info!(project = %project.name, tag = %new_tag, "activating release");
         project.compose_up(&new_tag)?;
+        println!("✓ Activate");
         health::wait(&project.config.deployment)?;
+        println!("✓ Health check");
         Ok(())
     })();
 
@@ -64,9 +77,10 @@ pub fn run(project: &Project) -> Result<()> {
     }
 
     state.previous = old_release;
-    state.current = Some(Release::new(new_revision.clone(), new_tag));
+    state.current = Some(Release::new(new_revision.clone(), new_tag.clone()));
     state.save(&project.state_path)?;
 
-    println!("Healthy: {}", project.name);
+    println!();
+    println!("Healthy: {} @ {}", project.name, new_tag);
     Ok(())
 }
