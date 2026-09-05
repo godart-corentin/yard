@@ -218,7 +218,7 @@ impl Project {
             let modified = metadata.modified()?;
             let should_replace = latest
                 .as_ref()
-                .is_none_or(|(_, current)| modified > *current);
+                .map_or(true, |(_, current)| modified > *current);
             if should_replace {
                 latest = Some((path, modified));
             }
