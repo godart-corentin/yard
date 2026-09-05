@@ -74,6 +74,8 @@ impl Default for DeploymentConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackupConfig {
     pub command: Vec<String>,
+    pub directory: Option<PathBuf>,
+    pub extension: Option<String>,
 }
 
 impl ProjectConfig {
@@ -127,6 +129,15 @@ impl ProjectConfig {
             if backup.command.is_empty() || backup.command[0].trim().is_empty() {
                 return Err(YardError::Config(
                     "backup.command must contain an executable".into(),
+                ));
+            }
+            if backup
+                .extension
+                .as_deref()
+                .is_some_and(|extension| extension.trim().is_empty())
+            {
+                return Err(YardError::Config(
+                    "backup.extension must not be empty when configured".into(),
                 ));
             }
         }
