@@ -1,0 +1,28 @@
+# Example Yard project. This is intentionally generic and contains no secrets.
+
+repo = "/srv/hello-api"
+branch = "main"
+remote = "origin"
+
+[compose]
+directory = "/srv/hello-api/deploy"
+file = "docker-compose.yml"
+env_file = ".env"
+service = "api"
+
+# The Compose file should use an image reference such as:
+#   image: hello-api:${HELLO_API_IMAGE_TAG:-local}
+# and may define a build section on the same service.
+[image]
+name = "hello-api"
+tag_env = "HELLO_API_IMAGE_TAG"
+
+[deployment]
+migration_service = "migrate"
+health_url = "https://api.example.com/health"
+health_attempts = 30
+health_interval_seconds = 2
+
+# Optional. Yard executes commands directly, without a shell.
+[backup]
+command = ["/usr/local/sbin/hello-api-backup"]
