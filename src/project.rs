@@ -47,11 +47,7 @@ impl Project {
     }
 
     pub fn ensure_clean(&self) -> Result<()> {
-        let output = self.git_checked(&[
-            "status",
-            "--porcelain",
-            "--untracked-files=no",
-        ])?;
+        let output = self.git_checked(&["status", "--porcelain", "--untracked-files=no"])?;
         if !output.trim().is_empty() {
             return Err(YardError::Config(format!(
                 "{} has tracked local changes; refusing to deploy",
@@ -79,11 +75,7 @@ impl Project {
     }
 
     pub fn update_branch(&self) -> Result<()> {
-        self.git_checked(&[
-            "fetch",
-            &self.config.remote,
-            &self.config.branch,
-        ])?;
+        self.git_checked(&["fetch", &self.config.remote, &self.config.branch])?;
         self.git_checked(&[
             "merge",
             "--ff-only",
@@ -140,11 +132,7 @@ impl Project {
             return Ok(());
         };
         let mut args = self.compose_args();
-        args.extend([
-            "run".to_owned(),
-            "--rm".to_owned(),
-            service.clone(),
-        ]);
+        args.extend(["run".to_owned(), "--rm".to_owned(), service.clone()]);
         command::checked(
             "docker",
             &args,
@@ -175,31 +163,17 @@ impl Project {
     pub fn compose_ps(&self) -> Result<String> {
         let mut args = self.compose_args();
         args.push("ps".to_owned());
-        command::checked(
-            "docker",
-            &args,
-            Some(&self.config.compose.directory),
-            &[],
-        )
+        command::checked("docker", &args, Some(&self.config.compose.directory), &[])
     }
 
     pub fn compose_logs(&self, tail: u32, follow: bool) -> Result<()> {
         let mut args = self.compose_args();
-        args.extend([
-            "logs".to_owned(),
-            "--tail".to_owned(),
-            tail.to_string(),
-        ]);
+        args.extend(["logs".to_owned(), "--tail".to_owned(), tail.to_string()]);
         if follow {
             args.push("--follow".to_owned());
         }
         args.push(self.config.compose.service.clone());
-        command::inherit(
-            "docker",
-            &args,
-            Some(&self.config.compose.directory),
-            &[],
-        )
+        command::inherit("docker", &args, Some(&self.config.compose.directory), &[])
     }
 
     pub fn run_backup(&self) -> Result<()> {
@@ -216,7 +190,10 @@ impl Project {
     fn git_checked(&self, args: &[&str]) -> Result<String> {
         command::checked(
             "git",
-            &args.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>(),
+            &args
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
             Some(&self.config.repo),
             &[],
         )
