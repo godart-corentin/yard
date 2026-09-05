@@ -95,10 +95,14 @@ impl ProjectConfig {
             return Err(YardError::Config("compose.file must not be empty".into()));
         }
         if self.compose.service.trim().is_empty() {
-            return Err(YardError::Config("compose.service must not be empty".into()));
+            return Err(YardError::Config(
+                "compose.service must not be empty".into(),
+            ));
         }
         if self.compose.env_file.trim().is_empty() {
-            return Err(YardError::Config("compose.env_file must not be empty".into()));
+            return Err(YardError::Config(
+                "compose.env_file must not be empty".into(),
+            ));
         }
         if self.image.name.trim().is_empty() {
             return Err(YardError::Config("image.name must not be empty".into()));
