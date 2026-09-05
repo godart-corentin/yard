@@ -24,5 +24,9 @@ health_attempts = 30
 health_interval_seconds = 2
 
 # Optional. Yard executes commands directly, without a shell.
+# directory/extension let `yard status` report the newest backup file,
+# including backups created outside Yard (for example by a systemd timer).
 [backup]
 command = ["/usr/local/sbin/hello-api-backup"]
+directory = "/backup/hello-api"
+extension = "dump"
