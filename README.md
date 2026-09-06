@@ -84,9 +84,12 @@ The installer builds a release binary and installs:
 
 ```text
 /usr/local/bin/yard
+/usr/local/share/yard/web-src/
 /etc/yard/projects/
 /var/lib/yard/
 ```
+
+The optional private status dashboard uses a standalone Rust server in Docker and follows Kilnr's `install-web.sh` lifecycle. See [`docs/web.md`](docs/web.md).
 
 ## Project manifests
 

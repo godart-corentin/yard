@@ -12,17 +12,17 @@ die() {
 DOMAIN="$1"
 [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain"
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WEB_SOURCE="${SOURCE_DIR}/web"
+WEB_SOURCE="/usr/local/share/yard/web-src"
 YARD_ROOT="/opt/yard"
 YARD_COMPOSE="${YARD_ROOT}/docker-compose.yml"
 CADDY_CONTAINER="${YARD_CADDY_CONTAINER:-caddy}"
-AUTH_USER="${YARD_WEB_USER:-}"
+AUTH_USER="${YARD_WEB_USER:-yard}"
 
 command -v docker >/dev/null || die "docker not found"
 command -v python3 >/dev/null || die "python3 not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin unavailable"
-[[ -f "${WEB_SOURCE}/Dockerfile" ]] || die "web source not found at ${WEB_SOURCE}"
+[[ -f "${WEB_SOURCE}/Dockerfile" ]] \
+  || die "Yard Web source is not installed; run ./install.sh first"
 [[ -d /etc/yard/projects ]] || die "/etc/yard/projects does not exist; install Yard first"
 [[ -d /var/lib/yard ]] || die "/var/lib/yard does not exist; install Yard first"
 docker inspect "$CADDY_CONTAINER" >/dev/null 2>&1 || die "running Caddy container '$CADDY_CONTAINER' not found"
@@ -133,9 +133,8 @@ services:
     healthcheck:
       test:
         - CMD
-        - python3
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=2).read()"
+        - yard-web
+        - --healthcheck
       interval: 30s
       timeout: 5s
       retries: 3
@@ -151,13 +150,11 @@ EOF
 
 docker compose -f "$TMP_COMPOSE" config >/dev/null
 
-if [[ -z "$AUTH_USER" ]]; then
-  read -rp "Username: " AUTH_USER
-fi
 [[ "$AUTH_USER" =~ ^[A-Za-z0-9._-]+$ ]] \
   || die "username must contain only letters, numbers, dot, underscore or dash"
 
 echo "Choose the password for https://${DOMAIN}"
+echo "Username: ${AUTH_USER}"
 read -rsp "Password: " PASSWORD
 echo
 read -rsp "Confirm password: " PASSWORD2

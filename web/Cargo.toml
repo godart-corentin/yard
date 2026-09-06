@@ -1,0 +1,17 @@
+[package]
+name = "yard-web"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Private status dashboard for Yard projects"
+license = "MIT"
+
+[[bin]]
+name = "yard-web"
+path = "server/main.rs"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"

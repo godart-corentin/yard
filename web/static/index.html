@@ -4,34 +4,75 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <title>Yard Status</title>
+    <meta
+      name="description"
+      content="Yard infrastructure dashboard for homelab service health and releases."
+    />
+    <title>Yard — Infrastructure dashboard</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
-        <div>
-          <div class="brand">Yard <span>Status</span></div>
-          <div class="muted">Deployment health from configured Yard projects</div>
+        <div class="brand-lockup">
+          <svg
+            class="brand-mark"
+            viewBox="0 0 32 32"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M16 2 28 9v14l-12 7L4 23V9L16 2Z" fill="currentColor" />
+            <path
+              d="m10.5 10.5 5.5 3.25 5.5-3.25v4.25L18 16.8v5.7h-4v-5.7l-3.5-2.05V10.5Z"
+              fill="var(--bg)"
+            />
+          </svg>
+          <div>
+            <div class="brand">Yard</div>
+            <div class="brand-subtitle">Infrastructure dashboard</div>
+          </div>
         </div>
-        <button id="refresh" class="refresh" type="button">Refresh</button>
+        <button id="refresh" class="refresh" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path
+              d="M15.3 5.2A7 7 0 1 0 17 10h-2a5 5 0 1 1-1.2-3.2L11 9h7V2l-2.7 3.2Z"
+              fill="currentColor"
+            />
+          </svg>
+          <span>Refresh</span>
+        </button>
       </header>
 
-      <section id="summary" class="summary panel loading">
-        <div>
-          <div class="eyebrow">Overall status</div>
-          <h1>Checking services…</h1>
+      <section class="summary" aria-label="Service summary" aria-live="polite">
+        <div class="summary-item">
+          <span class="summary-label">Total services</span>
+          <strong id="total-count" class="summary-value">—</strong>
         </div>
-        <div id="summary-badge" class="badge pending">Checking</div>
+        <div class="summary-item">
+          <span class="summary-label">Operational</span>
+          <strong id="operational-count" class="summary-value good">—</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">Down</span>
+          <strong id="down-count" class="summary-value">—</strong>
+        </div>
+        <div class="summary-item summary-time">
+          <span class="summary-label">Last refresh</span>
+          <time id="checked-at" class="summary-value summary-value-time">Checking…</time>
+        </div>
       </section>
 
-      <section>
+      <section aria-labelledby="services-title">
         <div class="section-title">
-          <h2>Projects</h2>
-          <div id="checked-at" class="muted"></div>
+          <div>
+            <h1 id="services-title">Services</h1>
+            <p>Health checks and deployed releases</p>
+          </div>
+          <div id="overall-badge" class="badge pending">Checking</div>
         </div>
-        <div id="projects" class="panel projects">
-          <div class="empty">Loading Yard projects…</div>
+        <div id="projects" class="projects" aria-busy="true">
+          <div class="empty">Loading Yard services…</div>
         </div>
       </section>
     </main>

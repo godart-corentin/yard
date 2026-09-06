@@ -13,10 +13,16 @@ Projects without `deployment.health_url` still appear, but their health is repor
 
 ## Install
 
-Yard Web follows the same deployment model as KilnR Web: a dedicated Docker container behind the existing Caddy reverse proxy.
-No host port is published.
+Yard Web follows the same deployment model as Kilnr Web: a dedicated Docker container behind the existing Caddy reverse proxy.
+The application server is a standalone Rust binary and no host port is published.
 
-From a Yard source checkout:
+Install or update Yard first. The main installer copies the reproducible Yard Web build context to `/usr/local/share/yard/web-src`, so the web deployment does not depend on keeping a source checkout:
+
+```bash
+./install.sh
+```
+
+Then, from the Yard source checkout:
 
 ```bash
 sudo ./install-web.sh status.example.com
@@ -29,8 +35,9 @@ The installer:
 3. asks for a Basic Auth password (username defaults to `yard`);
 4. stores only Caddy's password hash in the Caddyfile;
 5. mounts `/etc/yard/projects` and `/var/lib/yard` read-only into `yard-web`;
-6. builds and starts the `yard-web` container;
-7. validates and reloads Caddy.
+6. builds the Rust `yard-web` binary from the installed web source;
+7. starts the `yard-web` container as an unprivileged user;
+8. validates and reloads Caddy.
 
 Override the username with:
 
@@ -75,12 +82,23 @@ GET /api/status
 
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
 
+## Update
+
+Update the Yard CLI, installed web source and any running web container together:
+
+```bash
+./update.sh
+```
+
+If `yard-web` is running, the updater rebuilds its image from the newly installed Rust server and frontend source.
+
 ## Security
 
 Basic Auth is enforced by Caddy, not by the application container.
 
 `yard-web`:
 
+- runs a native Rust HTTP server with no Python application runtime;
 - publishes no host port;
 - mounts Yard configuration and state read-only;
 - runs with a read-only root filesystem;

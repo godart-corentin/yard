@@ -22,5 +22,14 @@ jobs:
         run: cargo clippy --all-targets --all-features
       - name: Test
         run: cargo test --all-features
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: rustfmt, clippy
+      - name: Web format
+        run: cargo fmt --manifest-path web/Cargo.toml -- --check
+      - name: Web clippy
+        run: cargo clippy --manifest-path web/Cargo.toml --all-targets -- -D warnings
       - name: Web tests
-        run: python3 -m unittest tests/test_web.py
+        run: cargo test --manifest-path web/Cargo.toml --locked
+      - name: Installer syntax
+        run: bash -n install.sh install-web.sh uninstall-web.sh update.sh

@@ -1,18 +1,27 @@
-FROM python:3.13-alpine
+FROM rust:1.88-alpine AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY server ./server
+RUN cargo build --release --locked
+
+FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /opt/yard
 
-COPY server/yard_web.py /opt/yard/server.py
+COPY --from=builder /build/target/release/yard-web /usr/local/bin/yard-web
 COPY static /opt/yard/static
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    YARD_WEB_HOST=0.0.0.0 \
+ENV YARD_WEB_HOST=0.0.0.0 \
     YARD_WEB_PORT=8088 \
     YARD_PROJECTS_DIR=/etc/yard/projects \
     YARD_STATE_DIR=/var/lib/yard \
     YARD_WEB_STATIC=/opt/yard/static
 
-CMD ["python3", "/opt/yard/server.py"]
+USER 65532:65532
+
+CMD ["yard-web"]

@@ -1,6 +1,8 @@
 const projectsEl = document.querySelector('#projects')
-const summaryEl = document.querySelector('#summary')
-const summaryBadgeEl = document.querySelector('#summary-badge')
+const overallBadgeEl = document.querySelector('#overall-badge')
+const totalCountEl = document.querySelector('#total-count')
+const operationalCountEl = document.querySelector('#operational-count')
+const downCountEl = document.querySelector('#down-count')
 const checkedAtEl = document.querySelector('#checked-at')
 const refreshEl = document.querySelector('#refresh')
 
@@ -11,119 +13,240 @@ const labels = {
   unknown: 'Unknown'
 }
 
-const overallTitles = {
-  operational: 'All systems operational',
-  degraded: 'Some services are degraded',
-  down: 'Services are unavailable',
-  unknown: 'Status is incomplete'
+const toDate = (value, unix = false) => {
+  if (!value) return null
+  const date = new Date(unix ? Number(value) * 1000 : value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const formatDateTime = (value, unix = false) => {
+  const date = toDate(value, unix)
+  if (!date) return '—'
+  return date.toLocaleString([], {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  })
 }
 
 const formatTime = (value) => {
-  if (!value) return '—'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
-}
-
-const formatUnix = (value) => {
-  if (!value) return '—'
-  const date = new Date(Number(value) * 1000)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
+  const date = toDate(value)
+  if (!date) return '—'
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
 }
 
 const shortRevision = (value) => value ? String(value).slice(0, 12) : '—'
 
 const statusBadge = (status) => {
+  const resolvedStatus = labels[status] ? status : 'unknown'
   const badge = document.createElement('div')
-  badge.className = `badge ${status || 'unknown'}`
-  badge.textContent = labels[status] || labels.unknown
+  badge.className = `badge ${resolvedStatus}`
+  badge.textContent = labels[resolvedStatus]
   return badge
 }
 
-const renderProject = (project) => {
-  const row = document.createElement('article')
-  row.className = 'project-row'
-
-  const identity = document.createElement('div')
-  const name = document.createElement('div')
-  name.className = 'project-name'
-  name.textContent = project.name
-  const url = document.createElement('div')
-  url.className = 'project-url'
-  url.textContent = project.health_url || 'No health check configured'
-  identity.append(name, url)
-
-  const meta = document.createElement('div')
-  meta.className = 'project-meta'
-  const release = project.release || {}
-  const releaseLine = document.createElement('div')
-  releaseLine.append('Release ')
-  const sha = document.createElement('span')
-  sha.className = 'sha'
-  sha.textContent = release.tag || shortRevision(release.revision)
-  releaseLine.append(sha)
-  const deployed = document.createElement('div')
-  deployed.textContent = `Deployed ${formatUnix(release.deployed_at_unix)}`
-  meta.append(releaseLine, deployed)
-
-  const status = document.createElement('div')
-  status.className = 'project-status'
-  status.append(statusBadge(project.status))
-  const latency = document.createElement('div')
-  latency.className = 'latency'
-  latency.textContent = project.latency_ms == null ? '—' : `${project.latency_ms} ms${project.http_status ? ` · HTTP ${project.http_status}` : ''}`
-  status.append(latency)
-  if (project.error) {
-    const error = document.createElement('div')
-    error.className = 'error'
-    error.textContent = project.error
-    status.append(error)
+const externalLink = (label, value, className = '') => {
+  let url
+  try {
+    url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported URL')
+  } catch {
+    const text = document.createElement('span')
+    text.className = `${className} invalid-url`.trim()
+    text.textContent = label
+    text.title = value
+    return text
   }
 
-  row.append(identity, meta, status)
-  return row
+  const link = document.createElement('a')
+  link.className = className
+  link.href = url.href
+  link.target = '_blank'
+  link.rel = 'noreferrer'
+  link.textContent = label
+  link.title = value
+  return link
+}
+
+const addFact = (list, label, value, className = '') => {
+  const item = document.createElement('div')
+  item.className = 'fact'
+  const term = document.createElement('dt')
+  term.textContent = label
+  const description = document.createElement('dd')
+  if (className) description.className = className
+  description.textContent = value
+  item.append(term, description)
+  list.append(item)
+}
+
+const renderProject = (project) => {
+  const card = document.createElement('article')
+  card.className = 'service-card'
+
+  const header = document.createElement('header')
+  header.className = 'service-header'
+  const name = document.createElement('h2')
+  name.className = 'service-name'
+  name.textContent = project.name || 'Unnamed service'
+  header.append(name, statusBadge(project.status))
+
+  const endpoints = document.createElement('div')
+  endpoints.className = 'endpoints'
+
+  const publicUrl = project.public_url || project.url
+  if (publicUrl) {
+    const publicRow = document.createElement('div')
+    publicRow.className = 'endpoint'
+    const publicLabel = document.createElement('span')
+    publicLabel.textContent = 'Service'
+    publicRow.append(publicLabel, externalLink(publicUrl, publicUrl, 'endpoint-link'))
+    endpoints.append(publicRow)
+  }
+
+  const healthRow = document.createElement('div')
+  healthRow.className = 'endpoint'
+  const healthLabel = document.createElement('span')
+  healthLabel.textContent = 'Health'
+  const healthValue = project.health_url
+    ? externalLink(project.health_url, project.health_url, 'endpoint-link')
+    : document.createElement('span')
+  if (!project.health_url) {
+    healthValue.className = 'endpoint-empty'
+    healthValue.textContent = 'Not configured'
+  }
+  healthRow.append(healthLabel, healthValue)
+  endpoints.append(healthRow)
+
+  const facts = document.createElement('dl')
+  facts.className = 'service-facts'
+  addFact(
+    facts,
+    'Latency',
+    project.latency_ms == null ? '—' : `${project.latency_ms} ms`,
+    'tabular'
+  )
+  addFact(
+    facts,
+    'HTTP',
+    project.http_status == null ? '—' : String(project.http_status),
+    'tabular'
+  )
+  addFact(facts, 'Checked', formatTime(project.checked_at), 'tabular')
+
+  const release = project.release || {}
+  const releaseBlock = document.createElement('div')
+  releaseBlock.className = 'release'
+  const releaseCopy = document.createElement('div')
+  releaseCopy.className = 'release-copy'
+  const releaseLabel = document.createElement('span')
+  releaseLabel.className = 'release-label'
+  releaseLabel.textContent = 'Deployed release'
+  const releaseValue = document.createElement('div')
+  releaseValue.className = 'release-value'
+  const releaseTag = document.createElement('code')
+  releaseTag.textContent = release.tag || shortRevision(release.revision)
+  releaseValue.append(releaseTag)
+  if (release.tag && release.revision && !String(release.revision).startsWith(String(release.tag))) {
+    const releaseSha = document.createElement('span')
+    releaseSha.textContent = shortRevision(release.revision)
+    releaseValue.append(releaseSha)
+  }
+  releaseCopy.append(releaseLabel, releaseValue)
+
+  const deployedAt = document.createElement('time')
+  deployedAt.className = 'deployed-at'
+  deployedAt.textContent = formatDateTime(release.deployed_at_unix, true)
+  if (release.deployed_at_unix) {
+    const date = toDate(release.deployed_at_unix, true)
+    if (date) deployedAt.dateTime = date.toISOString()
+  }
+  releaseBlock.append(releaseCopy, deployedAt)
+
+  card.append(header, endpoints, facts, releaseBlock)
+
+  if (project.error) {
+    const error = document.createElement('p')
+    error.className = 'service-error'
+    error.textContent = project.error
+    card.append(error)
+  }
+
+  return card
+}
+
+const updateSummary = (payload) => {
+  const projects = Array.isArray(payload.projects) ? payload.projects : []
+  const operational = projects.filter((project) => project.status === 'operational').length
+  const down = projects.filter((project) => project.status === 'down').length
+  const status = labels[payload.status] ? payload.status : 'unknown'
+
+  totalCountEl.textContent = String(projects.length)
+  operationalCountEl.textContent = String(operational)
+  downCountEl.textContent = String(down)
+  downCountEl.classList.toggle('bad', down > 0)
+  checkedAtEl.textContent = formatTime(payload.checked_at)
+  const checkedDate = toDate(payload.checked_at)
+  checkedAtEl.dateTime = checkedDate ? checkedDate.toISOString() : ''
+  overallBadgeEl.className = `badge ${status}`
+  overallBadgeEl.textContent = labels[status]
 }
 
 const render = (payload) => {
-  const status = payload.status || 'unknown'
-  summaryEl.className = `summary panel ${status}`
-  summaryEl.querySelector('h1').textContent = overallTitles[status] || overallTitles.unknown
-  summaryBadgeEl.className = `badge ${status}`
-  summaryBadgeEl.textContent = labels[status] || labels.unknown
-  checkedAtEl.textContent = `Checked ${formatTime(payload.checked_at)}`
+  const projects = Array.isArray(payload.projects) ? payload.projects : []
+  updateSummary({ ...payload, projects })
 
   projectsEl.replaceChildren()
-  if (!payload.projects?.length) {
+  projectsEl.setAttribute('aria-busy', 'false')
+  if (!projects.length) {
     const empty = document.createElement('div')
     empty.className = 'empty'
-    empty.textContent = 'No Yard projects found.'
+    empty.setAttribute('role', 'status')
+    empty.textContent = 'No Yard services found.'
     projectsEl.append(empty)
     return
   }
 
-  for (const project of payload.projects) {
+  for (const project of projects) {
     projectsEl.append(renderProject(project))
   }
 }
 
+const renderError = (error) => {
+  totalCountEl.textContent = '—'
+  operationalCountEl.textContent = '—'
+  downCountEl.textContent = '—'
+  downCountEl.classList.remove('bad')
+  checkedAtEl.textContent = 'Unavailable'
+  checkedAtEl.dateTime = ''
+  overallBadgeEl.className = 'badge down'
+  overallBadgeEl.textContent = 'Unavailable'
+
+  projectsEl.replaceChildren()
+  projectsEl.setAttribute('aria-busy', 'false')
+  const empty = document.createElement('div')
+  empty.className = 'empty error-state'
+  empty.setAttribute('role', 'alert')
+  empty.textContent = error instanceof Error ? error.message : String(error)
+  projectsEl.append(empty)
+}
+
 const load = async () => {
   refreshEl.disabled = true
+  refreshEl.setAttribute('aria-label', 'Refreshing service status')
+  projectsEl.setAttribute('aria-busy', 'true')
   try {
     const response = await fetch('/api/status', { cache: 'no-store' })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) throw new Error(`Status request failed with HTTP ${response.status}`)
     render(await response.json())
   } catch (error) {
-    summaryEl.className = 'summary panel down'
-    summaryEl.querySelector('h1').textContent = 'Yard status is unavailable'
-    summaryBadgeEl.className = 'badge down'
-    summaryBadgeEl.textContent = 'Down'
-    checkedAtEl.textContent = ''
-    projectsEl.replaceChildren()
-    const empty = document.createElement('div')
-    empty.className = 'empty'
-    empty.textContent = error instanceof Error ? error.message : String(error)
-    projectsEl.append(empty)
+    renderError(error)
   } finally {
     refreshEl.disabled = false
+    refreshEl.removeAttribute('aria-label')
   }
 }
 
