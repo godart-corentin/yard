@@ -15,6 +15,8 @@ yard backup hello-api
 
 Yard sits on top of tools you already trust — Git, Docker Compose, HTTP health checks, and existing backup commands — and turns common deployment operations into predictable, repeatable commands.
 
+An optional private **Yard Web** dashboard can expose the current health and deployed release of the projects already configured in Yard. It uses the same project manifests; there is no second status-page configuration to maintain.
+
 ## Why Yard?
 
 A homelab often starts with a few Compose files and eventually grows its own collection of shell snippets:
@@ -45,13 +47,15 @@ That works, but each application ends up being operated differently. Yard provid
         └────── deploy / rollback ───────┘
                         │
                    health check
+                        │
+                  optional Web UI
 ```
 
 ## Philosophy
 
 Yard aims to be:
 
-- **small** — a CLI, not a platform;
+- **small** — a CLI with an optional status UI, not a platform;
 - **explicit** — deployment behavior lives in readable project manifests;
 - **boring** — use standard Linux and Docker primitives instead of inventing new infrastructure;
 - **safe by default** — backups, health checks, immutable image tags, and deliberate rollback behavior;
@@ -66,13 +70,15 @@ Yard targets Linux hosts with:
 
 - Git;
 - Docker with the `docker compose` plugin;
-- Rust/Cargo only when building Yard from source.
+- either Rust/Cargo or Docker when installing Yard from source.
 
-The resulting Yard executable is a standalone native binary; Python or another application runtime is not required.
+If Cargo is available, `install.sh` builds Yard directly. Otherwise it uses the official Rust Docker image to build the CLI, so Rust does not need to be installed permanently on the host.
+
+The installed Yard CLI is a standalone native binary. Yard Web is also a native Rust server built inside Docker; no Python application runtime is required.
 
 ## Installation
 
-Build and install from source:
+Clone the repository and install Yard:
 
 ```bash
 git clone https://github.com/godart-corentin/yard.git
@@ -80,7 +86,7 @@ cd yard
 ./install.sh
 ```
 
-The installer builds a release binary and installs:
+The installer creates or installs:
 
 ```text
 /usr/local/bin/yard
@@ -89,7 +95,11 @@ The installer builds a release binary and installs:
 /var/lib/yard/
 ```
 
-The optional private status dashboard uses a standalone Rust server in Docker and follows Kilnr's `install-web.sh` lifecycle. See [`docs/web.md`](docs/web.md).
+The source checkout can also be updated later with:
+
+```bash
+./update.sh
+```
 
 ## Project manifests
 
@@ -176,15 +186,79 @@ yard --projects-dir ./projects --state-dir ./state list
 
 or with `YARD_PROJECTS_DIR` and `YARD_STATE_DIR`.
 
+## Yard Web
+
+Yard Web is an optional private dashboard for the projects already registered in Yard.
+
+It reads:
+
+- the project inventory from `/etc/yard/projects/*.toml`;
+- `deployment.health_url` for the current HTTP health check;
+- `/var/lib/yard/<project>.json` for the deployed release metadata.
+
+A project without `deployment.health_url` still appears, but its health is reported as `Unknown`.
+
+The dashboard shows projects as a responsive card grid with current health, latency, HTTP status, last check, and deployed release information when available.
+
+### Install Yard Web
+
+From a Yard source checkout:
+
+```bash
+sudo ./install-web.sh status.example.com
+```
+
+`install-web.sh` prefers the `web/` source next to the script and falls back to `/usr/local/share/yard/web-src` when needed. The Rust web server is compiled by the Dockerfile, so Cargo is not required on the host for this step.
+
+The installer:
+
+1. discovers the running Caddy container and its mounted Caddyfile;
+2. reuses an existing Docker network already attached to Caddy;
+3. asks for a Basic Auth username and password;
+4. stores only Caddy's password hash in the Caddyfile;
+5. mounts Yard project manifests and deployment state read-only;
+6. builds and starts the `yard-web` container without publishing a host port;
+7. validates and reloads Caddy;
+8. waits for `yard-web` to become healthy.
+
+If Caddy network discovery is ambiguous, choose one explicitly:
+
+```bash
+sudo YARD_PROXY_NETWORK=caddy-proxy ./install-web.sh status.example.com
+```
+
+The generated Compose project lives at:
+
+```text
+/opt/yard/docker-compose.yml
+```
+
+Caddy and previous Yard Web configuration are backed up under:
+
+```text
+/opt/yard/backups/
+```
+
+Yard Web exposes these endpoints inside its Docker network:
+
+```text
+GET /healthz
+GET /api/status
+```
+
+The browser refreshes automatically, while the server briefly caches health results to avoid duplicate checks.
+
+More detail is available in [`docs/web.md`](docs/web.md).
+
 ## Deployment model
 
 `yard deploy <project>` currently follows this lifecycle:
 
 1. refuse to deploy if tracked local Git changes exist;
 2. switch to the configured branch;
-3. run the project's backup command when configured;
-4. fetch and fast-forward from the configured Git remote;
-5. derive an immutable image tag from the Git commit SHA;
+3. fetch and fast-forward from the configured Git remote;
+4. run the project's backup command when configured;
+5. derive an immutable image tag from the updated Git commit SHA;
 6. build the configured Compose service using that tag;
 7. run the migration service when configured;
 8. persist the new image tag in the project's Compose `.env` file;
@@ -234,9 +308,19 @@ Recommended practices:
 
 Yard executes configured backup commands directly, without a shell. This avoids shell expansion in manifest values, but project manifests are still privileged operational configuration and should only be writable by trusted administrators.
 
+Yard Web is designed to remain private behind Caddy Basic Auth. Its container runs unprivileged, publishes no host port, mounts Yard configuration and state read-only, uses a read-only root filesystem, drops Linux capabilities, and does not read application `.env` files.
+
+## Remove Yard Web
+
+```bash
+sudo ./uninstall-web.sh
+```
+
+This removes the Yard Caddy block and the Yard Web Compose project. It leaves `/etc/yard/projects` and `/var/lib/yard` untouched.
+
 ## Status
 
-Yard is in **early development**. The command surface and manifest format may change while the deployment and rollback model is being hardened.
+Yard is in **early development**. The command surface and manifest format may change while the deployment, rollback, and status-dashboard model is being hardened.
 
 The first target is a single-host Docker Compose homelab. More abstraction should only be added when real deployments demonstrate a need for it.
 
