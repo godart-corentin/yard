@@ -22,3 +22,5 @@ jobs:
         run: cargo clippy --all-targets --all-features
       - name: Test
         run: cargo test --all-features
+      - name: Web tests
+        run: python3 -m unittest tests/test_web.py
