@@ -41,7 +41,16 @@ text = re.sub(r"\n?# BEGIN YARD\n.*?# END YARD\n?", "\n", text, flags=re.DOTALL)
 output.write_text(text.rstrip() + "\n", encoding="utf-8")
 PY
 
-install -o root -g root -m 0644 "$TMP_CADDYFILE" "$CADDYFILE"
+# Keep the inode of the single-file bind mount so the running Caddy container
+# sees the updated configuration without being recreated.
+cat "$TMP_CADDYFILE" >"$CADDYFILE"
+
+if ! docker exec "$CADDY_CONTAINER" \
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null; then
+  cat "$BACKUP_DIR/Caddyfile" >"$CADDYFILE"
+  die "live Caddyfile validation failed; restored previous configuration"
+fi
+
 docker exec "$CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null
 
 if [[ -f "$YARD_COMPOSE" ]]; then
