@@ -12,17 +12,29 @@ die() {
 DOMAIN="$1"
 [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "invalid domain"
 
-WEB_SOURCE="/usr/local/share/yard/web-src"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_WEB_SOURCE="${SOURCE_DIR}/web"
+INSTALLED_WEB_SOURCE="/usr/local/share/yard/web-src"
 YARD_ROOT="/opt/yard"
 YARD_COMPOSE="${YARD_ROOT}/docker-compose.yml"
 CADDY_CONTAINER="${YARD_CADDY_CONTAINER:-caddy}"
-AUTH_USER="${YARD_WEB_USER:-yard}"
+AUTH_USER="${YARD_WEB_USER:-}"
 
 command -v docker >/dev/null || die "docker not found"
 command -v python3 >/dev/null || die "python3 not found"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin unavailable"
-[[ -f "${WEB_SOURCE}/Dockerfile" ]] \
-  || die "Yard Web source is not installed; run ./install.sh first"
+
+# Prefer the source checkout when install-web.sh is run from the Yard repo.
+# Yard Web is built by its Dockerfile, so Cargo does not need to be installed
+# on the host. The installed copy remains a fallback for packaged installs.
+if [[ -f "${REPO_WEB_SOURCE}/Dockerfile" ]]; then
+  WEB_SOURCE="$REPO_WEB_SOURCE"
+elif [[ -f "${INSTALLED_WEB_SOURCE}/Dockerfile" ]]; then
+  WEB_SOURCE="$INSTALLED_WEB_SOURCE"
+else
+  die "Yard Web source not found next to install-web.sh or in ${INSTALLED_WEB_SOURCE}"
+fi
+
 [[ -d /etc/yard/projects ]] || die "/etc/yard/projects does not exist; install Yard first"
 [[ -d /var/lib/yard ]] || die "/var/lib/yard does not exist; install Yard first"
 docker inspect "$CADDY_CONTAINER" >/dev/null 2>&1 || die "running Caddy container '$CADDY_CONTAINER' not found"
@@ -80,6 +92,7 @@ fi
 
 [[ -n "$PROXY_NETWORK" ]] || die "cannot determine a reusable Caddy Docker network; set YARD_PROXY_NETWORK explicitly"
 
+echo "Yard Web source: ${WEB_SOURCE}"
 echo "Yard Web will use Caddy network: ${PROXY_NETWORK}"
 
 STATE_GID="$(stat -c '%g' /var/lib/yard)"
@@ -150,11 +163,13 @@ EOF
 
 docker compose -f "$TMP_COMPOSE" config >/dev/null
 
+if [[ -z "$AUTH_USER" ]]; then
+  read -rp "Username: " AUTH_USER
+fi
 [[ "$AUTH_USER" =~ ^[A-Za-z0-9._-]+$ ]] \
   || die "username must contain only letters, numbers, dot, underscore or dash"
 
 echo "Choose the password for https://${DOMAIN}"
-echo "Username: ${AUTH_USER}"
 read -rsp "Password: " PASSWORD
 echo
 read -rsp "Confirm password: " PASSWORD2
