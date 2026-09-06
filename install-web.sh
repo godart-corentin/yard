@@ -234,7 +234,17 @@ if [[ -f "$YARD_COMPOSE" ]]; then
 fi
 
 install -o root -g root -m 0644 "$TMP_COMPOSE" "$YARD_COMPOSE"
-install -o root -g root -m 0644 "$TMP_CADDYFILE" "$CADDYFILE"
+
+# The Caddyfile is bind-mounted as a single file. Replacing it with rename/install
+# changes the inode and leaves the running container attached to the old file.
+# Update the existing inode in place so Caddy sees the new contents immediately.
+cat "$TMP_CADDYFILE" >"$CADDYFILE"
+
+if ! docker exec "$CADDY_CONTAINER" \
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null; then
+  cat "$BACKUP_DIR/Caddyfile" >"$CADDYFILE"
+  die "live Caddyfile validation failed; restored previous configuration"
+fi
 
 docker compose -f "$YARD_COMPOSE" up -d --build
 
