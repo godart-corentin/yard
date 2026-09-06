@@ -3,12 +3,19 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo is required to build Yard from source." >&2
+if command -v cargo >/dev/null 2>&1; then
+  cargo build --release --locked --manifest-path "$ROOT_DIR/Cargo.toml"
+elif command -v docker >/dev/null 2>&1; then
+  echo "cargo not found; building Yard with Docker"
+  docker run --rm \
+    -v "$ROOT_DIR:/src" \
+    -w /src \
+    rust:bookworm \
+    cargo build --release --locked
+else
+  echo "cargo or Docker is required to build Yard from source." >&2
   exit 1
 fi
-
-cargo build --release --locked --manifest-path "$ROOT_DIR/Cargo.toml"
 
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
   SUDO=()
