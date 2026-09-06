@@ -17,7 +17,7 @@ WEB_SOURCE="${SOURCE_DIR}/web"
 YARD_ROOT="/opt/yard"
 YARD_COMPOSE="${YARD_ROOT}/docker-compose.yml"
 CADDY_CONTAINER="${YARD_CADDY_CONTAINER:-caddy}"
-AUTH_USER="${YARD_WEB_USER:-yard}"
+AUTH_USER="${YARD_WEB_USER:-}"
 
 command -v docker >/dev/null || die "docker not found"
 command -v python3 >/dev/null || die "python3 not found"
@@ -151,8 +151,13 @@ EOF
 
 docker compose -f "$TMP_COMPOSE" config >/dev/null
 
+if [[ -z "$AUTH_USER" ]]; then
+  read -rp "Username: " AUTH_USER
+fi
+[[ "$AUTH_USER" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || die "username must contain only letters, numbers, dot, underscore or dash"
+
 echo "Choose the password for https://${DOMAIN}"
-echo "Username: ${AUTH_USER}"
 read -rsp "Password: " PASSWORD
 echo
 read -rsp "Confirm password: " PASSWORD2
