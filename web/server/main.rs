@@ -64,6 +64,27 @@ struct ProjectFile {
     deployment: Option<Deployment>,
     service_health: Option<toml::Value>,
     compose: Option<toml::Value>,
+    backup: Option<WebBackup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebBackup {
+    offsite_command: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BackupAttempt {
+    started_at_unix: u64,
+    duration_ms: u128,
+    result: BackupResult,
+    destination: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BackupResult {
+    Success,
+    Failure,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +100,9 @@ struct Project {
     service_names: Vec<String>,
     release: Option<Value>,
     pending_release: Option<Value>,
+    last_backup: Option<BackupAttempt>,
+    last_offsite: Option<BackupAttempt>,
+    offsite_configured: Option<bool>,
     config_error: Option<String>,
 }
 
@@ -91,6 +115,9 @@ struct ProjectStatus {
     uses_service_probes: bool,
     release: Option<Value>,
     pending_release: Option<Value>,
+    last_backup: Option<BackupAttempt>,
+    last_offsite: Option<BackupAttempt>,
+    offsite_configured: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
     checked_at: String,
@@ -356,7 +383,7 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             if name == "host" {
                 return None;
             }
-            let (release, pending_release) = load_releases(state_dir, &name);
+            let (release, pending_release, last_backup, last_offsite) = load_project_state(state_dir, &name);
             let parsed = fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|contents| {
@@ -399,6 +426,9 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                         .filter(|url| !url.is_empty()),
                     release,
                     pending_release,
+                    last_backup,
+                    last_offsite,
+                    offsite_configured: Some(config.backup.and_then(|backup| backup.offsite_command).is_some()),
                     config_error: None,
                 },
                 Err(error) => Project {
@@ -408,6 +438,9 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                     service_names: vec![],
                     release,
                     pending_release,
+                    last_backup,
+                    last_offsite,
+                    offsite_configured: None,
                     config_error: Some(error),
                 },
             })
@@ -415,10 +448,10 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
         .collect()
 }
 
-fn load_releases(state_dir: &Path, project: &str) -> (Option<Value>, Option<Value>) {
+fn load_project_state(state_dir: &Path, project: &str) -> (Option<Value>, Option<Value>, Option<BackupAttempt>, Option<BackupAttempt>) {
     // host.json is reserved for the CLI's host snapshot, never project state.
     if project == "host" {
-        return (None, None);
+        return (None, None, None, None);
     }
     let state = fs::read_to_string(state_dir.join(format!("{project}.json")))
         .ok()
@@ -430,7 +463,10 @@ fn load_releases(state_dir: &Path, project: &str) -> (Option<Value>, Option<Valu
             .filter(|value| value.is_object())
             .cloned()
     };
-    (field("current"), field("pending"))
+    let backup = |name| state.as_ref()
+        .and_then(|value| value.get(name))
+        .and_then(|value| serde_json::from_value::<BackupAttempt>(value.clone()).ok());
+    (field("current"), field("pending"), backup("last_backup"), backup("last_offsite"))
 }
 
 fn check_projects(projects: Vec<Project>, client: &Client) -> Vec<ProjectStatus> {
@@ -490,6 +526,9 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
         uses_service_probes: project.has_service_probes,
         release: project.release,
         pending_release: project.pending_release,
+        last_backup: project.last_backup,
+        last_offsite: project.last_offsite,
+        offsite_configured: project.offsite_configured,
         config_error: project.config_error.clone(),
         checked_at: utc_now(),
         latency_ms: None,
@@ -895,6 +934,9 @@ mod tests {
             uses_service_probes: false,
             release: None,
             pending_release: None,
+            last_backup: None,
+            last_offsite: None,
+            offsite_configured: Some(false),
             config_error: None,
             checked_at: "2026-01-01T00:00:00Z".to_owned(),
             latency_ms: None,
@@ -951,6 +993,29 @@ mod tests {
     }
 
     #[test]
+    fn backup_payload_reads_only_recorded_fields_and_offsite_configuration() {
+        let root = temp_dir("backups");
+        let projects = root.join("projects");
+        let state = root.join("state");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(projects.join("demo.toml"), "[backup]\noffsite_command = [\"copy\"]\n").unwrap();
+        fs::write(state.join("demo.json"), r#"{"current":null,"last_backup":{"started_at_unix":123,"duration_ms":7,"result":"success","destination":"/archive","secret":"not-public"},"last_offsite":{"started_at_unix":124,"duration_ms":8,"result":"failure","destination":"remote:test"}}"#).unwrap();
+        let checked = check_project(load_projects(&projects, &state).remove(0), &Client::new());
+        let payload = serde_json::to_value(checked).unwrap();
+        assert_eq!(payload["last_backup"]["result"], "success");
+        assert_eq!(payload["last_offsite"]["result"], "failure");
+        assert_eq!(payload["last_offsite"]["destination"], "remote:test");
+        assert_eq!(payload["offsite_configured"], true);
+        assert!(payload["last_backup"].get("secret").is_none());
+        fs::write(state.join("demo.json"), "{\"current\":null,\"previous\":null}").unwrap();
+        let old = serde_json::to_value(check_project(load_projects(&projects, &state).remove(0), &Client::new())).unwrap();
+        assert!(old["last_backup"].is_null());
+        assert!(old["last_offsite"].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn exposes_pending_release_alongside_active_release() {
         let root = temp_dir("pending");
         let projects = root.join("projects");
@@ -981,6 +1046,9 @@ mod tests {
                 service_names: vec![],
                 release: None,
                 pending_release: None,
+                last_backup: None,
+                last_offsite: None,
+                offsite_configured: Some(false),
                 config_error: None,
             },
             &client,
@@ -1000,6 +1068,9 @@ mod tests {
                 service_names: vec![],
                 release: None,
                 pending_release: None,
+                last_backup: None,
+                last_offsite: None,
+                offsite_configured: None,
                 config_error: Some("invalid TOML".to_owned()),
             },
             &client,
@@ -1034,6 +1105,9 @@ mod tests {
                 service_names: vec![],
                 release: None,
                 pending_release: None,
+                last_backup: None,
+                last_offsite: None,
+                offsite_configured: Some(false),
                 config_error: None,
             },
             &client,
@@ -1098,7 +1172,8 @@ mod tests {
             r#"{"current":{"tag":"wrong"},"pending":{"tag":"also-wrong"}}"#,
         )
         .unwrap();
-        assert_eq!(load_releases(&dir, "host"), (None, None));
+        let (current, pending, local, offsite) = load_project_state(&dir, "host");
+        assert!(current.is_none() && pending.is_none() && local.is_none() && offsite.is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 

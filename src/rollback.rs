@@ -61,7 +61,7 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     );
     println!();
 
-    project.run_backup()?;
+    project.run_backup(&mut state)?;
     println!("✓ Backup");
 
     let mut pending = target.clone();

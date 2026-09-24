@@ -55,6 +55,35 @@ pub struct ProjectState {
     pub previous: Option<Release>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Release>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup: Option<BackupAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_offsite: Option<BackupAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupAttempt {
+    pub started_at_unix: u64,
+    pub duration_ms: u128,
+    pub result: BackupResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupResult {
+    Success,
+    Failure,
+}
+
+impl BackupResult {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
 }
 
 impl ProjectState {
@@ -81,6 +110,17 @@ impl ProjectState {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn old_state_has_no_inferred_backup_and_round_trips() {
+        let state: ProjectState =
+            serde_json::from_str(r#"{"current":null,"previous":null}"#).unwrap();
+        assert!(state.last_backup.is_none());
+        assert!(state.last_offsite.is_none());
+        let persisted = serde_json::to_value(state).unwrap();
+        assert!(persisted.get("last_backup").is_none());
+        assert!(persisted.get("last_offsite").is_none());
+    }
 
     #[test]
     fn preexisting_temp_file_is_not_followed_and_state_is_private() {

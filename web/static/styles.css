@@ -379,6 +379,20 @@ a:focus-visible {
   white-space: nowrap;
 }
 
+.backup-facts {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 12px;
+}
+
+.backup-facts .fact dd {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.backup-facts .fact dd.bad {
+  color: var(--bad);
+}
+
 .tabular {
   font-variant-numeric: tabular-nums;
 }

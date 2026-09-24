@@ -121,6 +121,8 @@ pub struct BackupConfig {
     pub command: Vec<String>,
     pub directory: Option<PathBuf>,
     pub extension: Option<String>,
+    pub offsite_command: Option<Vec<String>>,
+    pub offsite_destination: Option<String>,
 }
 
 impl ProjectConfig {
@@ -238,6 +240,29 @@ impl ProjectConfig {
             {
                 return Err(YardError::Config(
                     "backup.extension must not be empty when configured".into(),
+                ));
+            }
+            if backup
+                .offsite_command
+                .as_ref()
+                .is_some_and(|command| command.is_empty() || command[0].trim().is_empty())
+            {
+                return Err(YardError::Config(
+                    "backup.offsite_command must contain an executable".into(),
+                ));
+            }
+            if backup
+                .offsite_destination
+                .as_ref()
+                .is_some_and(|destination| destination.trim().is_empty())
+            {
+                return Err(YardError::Config(
+                    "backup.offsite_destination must not be empty".into(),
+                ));
+            }
+            if backup.offsite_destination.is_some() && backup.offsite_command.is_none() {
+                return Err(YardError::Config(
+                    "backup.offsite_destination requires backup.offsite_command".into(),
                 ));
             }
         }
