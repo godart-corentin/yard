@@ -170,6 +170,9 @@ yard list
 # Inspect Git, deployment state, Compose containers and host metrics
 yard status hello-api
 
+# Short overview of all projects (alerts for unhealthy services or image drift)
+yard status
+
 # Inspect only the host and refresh the Web snapshot
 yard host
 
@@ -202,6 +205,8 @@ yard logs hello-api --service worker --since 2026-09-24T08:00:00Z --no-follow
 # Run the configured backup command
 yard backup hello-api
 ```
+
+`yard status` (without a project) prints one summary line per configured project, including recorded releases, deployment and backup timestamps, service probes, checkout disk usage and alerts for stopped/missing containers or image drift. `yard status <project>` keeps its existing Git, release, backup, Compose and host sections and adds detailed probe measurements and timestamps. Disk (repo) counts allocated bytes in the local checkout only: Docker volumes, backup files outside the checkout and remote copies are not attributed to a project. An unreadable state is reported as an alert, never as a missing deployment.
 
 Image cleanup is CLI-only and never scheduled. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
 
