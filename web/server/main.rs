@@ -62,6 +62,8 @@ where
 #[derive(Debug, Deserialize)]
 struct ProjectFile {
     deployment: Option<Deployment>,
+    service_health: Option<toml::Value>,
+    compose: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +75,8 @@ struct Deployment {
 struct Project {
     name: String,
     health_url: Option<String>,
+    has_service_probes: bool,
+    service_names: Vec<String>,
     release: Option<Value>,
     pending_release: Option<Value>,
     config_error: Option<String>,
@@ -82,6 +86,9 @@ struct Project {
 struct ProjectStatus {
     name: String,
     health_url: Option<String>,
+    services: Vec<ServiceHealth>,
+    #[serde(skip)]
+    uses_service_probes: bool,
     release: Option<Value>,
     pending_release: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +156,33 @@ struct HostContainer {
     status: HostLevel,
 }
 
+// Explicit allowlist: never forward arbitrary snapshot or manifest fields.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServiceHealth {
+    project: String,
+    service: String,
+    status: ServiceLevel,
+    kind: Option<String>,
+    latency_ms: Option<u64>,
+    age_seconds: Option<u64>,
+    #[serde(default, skip_serializing)]
+    heartbeat_at_unix: Option<u64>,
+    #[serde(default, skip_serializing)]
+    max_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing)]
+    crit_multiplier: Option<u64>,
+    message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ServiceLevel {
+    Healthy,
+    Degraded,
+    Unhealthy,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HostSnapshot {
     version: u8,
@@ -162,6 +196,8 @@ struct HostSnapshot {
     containers: Vec<HostContainer>,
     containers_status: HostLevel,
     containers_message: Option<String>,
+    #[serde(default)]
+    services: Vec<ServiceHealth>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -182,7 +218,7 @@ fn load_host(state_dir: &Path, now: u64, max_age: u64) -> HostStatus {
     let Ok(contents) = fs::read_to_string(state_dir.join("host.json")) else {
         return unavailable(None, "Host snapshot unavailable");
     };
-    let Ok(snapshot) = serde_json::from_str::<HostSnapshot>(&contents) else {
+    let Ok(mut snapshot) = serde_json::from_str::<HostSnapshot>(&contents) else {
         return unavailable(None, "Host snapshot invalid");
     };
     if snapshot.version != 1 {
@@ -193,6 +229,34 @@ fn load_host(state_dir: &Path, now: u64, max_age: u64) -> HostStatus {
     };
     if age > max_age {
         return unavailable(Some(age), "Host snapshot stale");
+    }
+    for service in &mut snapshot.services {
+        if service.kind.as_deref() != Some("heartbeat") {
+            continue;
+        }
+        match (
+            service.heartbeat_at_unix,
+            service.max_age_seconds,
+            service.crit_multiplier,
+        ) {
+            (Some(stamp), Some(max), Some(multiplier)) if max > 0 && multiplier >= 2 => {
+                if let Some(age) = now.checked_sub(stamp) {
+                    service.age_seconds = Some(age);
+                    service.status = if age > max.saturating_mul(multiplier) {
+                        ServiceLevel::Unhealthy
+                    } else if age > max {
+                        ServiceLevel::Degraded
+                    } else {
+                        ServiceLevel::Healthy
+                    };
+                } else {
+                    service.status = ServiceLevel::Unknown;
+                    service.age_seconds = None;
+                }
+            }
+            _ if service.status == ServiceLevel::Healthy => service.status = ServiceLevel::Unknown,
+            _ => {}
+        }
     }
     HostStatus {
         status: "available",
@@ -233,17 +297,19 @@ impl App {
     fn status(&self) -> StatusPayload {
         if let Some(mut value) = self.cached_status() {
             value.host = self.host_status();
+            apply_service_snapshot(&mut value);
             return value;
         }
 
         let projects = load_projects(&self.config.projects_dir, &self.config.state_dir);
         let checked = check_projects(projects, &self.client);
-        let payload = StatusPayload {
+        let mut payload = StatusPayload {
             status: overall_status(&checked).to_owned(),
             checked_at: utc_now(),
             projects: checked,
             host: self.host_status(),
         };
+        apply_service_snapshot(&mut payload);
 
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         cache.valid_until = Instant::now() + self.config.cache_duration;
@@ -300,6 +366,32 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             Some(match parsed {
                 Ok(config) => Project {
                     name,
+                    has_service_probes: config.service_health.as_ref().is_some_and(|probes| {
+                        probes.as_table().is_some_and(|table| !table.is_empty())
+                    }),
+                    service_names: config
+                        .compose
+                        .as_ref()
+                        .map(|compose| {
+                            compose
+                                .get("services")
+                                .and_then(toml::Value::as_array)
+                                .map(|services| {
+                                    services
+                                        .iter()
+                                        .filter_map(toml::Value::as_str)
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .or_else(|| {
+                                    compose
+                                        .get("service")
+                                        .and_then(toml::Value::as_str)
+                                        .map(|name| vec![name.to_owned()])
+                                })
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default(),
                     health_url: config
                         .deployment
                         .and_then(|deployment| deployment.health_url)
@@ -312,6 +404,8 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                 Err(error) => Project {
                     name,
                     health_url: None,
+                    has_service_probes: false,
+                    service_names: vec![],
                     release,
                     pending_release,
                     config_error: Some(error),
@@ -375,8 +469,25 @@ fn check_projects(projects: Vec<Project>, client: &Client) -> Vec<ProjectStatus>
 
 fn check_project(project: Project, client: &Client) -> ProjectStatus {
     let mut result = ProjectStatus {
-        name: project.name,
+        name: project.name.clone(),
         health_url: project.health_url,
+        services: project
+            .service_names
+            .into_iter()
+            .map(|service| ServiceHealth {
+                project: project.name.clone(),
+                service,
+                status: ServiceLevel::Unknown,
+                kind: None,
+                latency_ms: None,
+                age_seconds: None,
+                heartbeat_at_unix: None,
+                max_age_seconds: None,
+                crit_multiplier: None,
+                message: Some("Service snapshot unavailable".to_owned()),
+            })
+            .collect(),
+        uses_service_probes: project.has_service_probes,
         release: project.release,
         pending_release: project.pending_release,
         config_error: project.config_error.clone(),
@@ -389,6 +500,11 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
 
     if let Some(error) = project.config_error {
         result.error = Some(error);
+        return result;
+    }
+
+    if project.has_service_probes {
+        result.error = Some("Service snapshot unavailable".to_owned());
         return result;
     }
 
@@ -429,23 +545,87 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
     result
 }
 
+fn service_project_status(services: &[ServiceHealth]) -> &'static str {
+    if services.is_empty() {
+        return "unknown";
+    }
+    let healthy = services
+        .iter()
+        .filter(|s| s.status == ServiceLevel::Healthy)
+        .count();
+    let unhealthy = services
+        .iter()
+        .filter(|s| s.status == ServiceLevel::Unhealthy)
+        .count();
+    if healthy == services.len() {
+        "healthy"
+    } else if unhealthy == services.len() {
+        "unhealthy"
+    } else if unhealthy > 0 || services.iter().any(|s| s.status == ServiceLevel::Degraded) {
+        "degraded"
+    } else {
+        "unknown"
+    }
+}
+
+fn apply_service_snapshot(payload: &mut StatusPayload) {
+    let fresh = if payload.host.status == "available" {
+        payload
+            .host
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.services.as_slice())
+    } else {
+        None
+    };
+    for project in &mut payload.projects {
+        let measured: Vec<_> = fresh
+            .unwrap_or(&[])
+            .iter()
+            .filter(|service| service.project == project.name)
+            .cloned()
+            .collect();
+        let available = !measured.is_empty();
+        if available {
+            project.services = measured;
+        } else {
+            for service in &mut project.services {
+                service.status = ServiceLevel::Unknown;
+                service.latency_ms = None;
+                service.age_seconds = None;
+                service.message = Some("Service snapshot unavailable".to_owned());
+            }
+        }
+        if !project.uses_service_probes {
+            continue;
+        }
+        project.status = service_project_status(&project.services).to_owned();
+        project.error = if !available {
+            Some("Service snapshot unavailable".to_owned())
+        } else {
+            None
+        };
+    }
+    payload.status = overall_status(&payload.projects).to_owned();
+}
+
 fn overall_status(projects: &[ProjectStatus]) -> &'static str {
     if projects.is_empty() {
         return "unknown";
     }
     let operational = projects
         .iter()
-        .filter(|project| project.status == "operational")
+        .filter(|project| matches!(project.status.as_str(), "operational" | "healthy"))
         .count();
     let down = projects
         .iter()
-        .filter(|project| project.status == "down")
+        .filter(|project| matches!(project.status.as_str(), "down" | "unhealthy"))
         .count();
     if operational == projects.len() {
         "operational"
     } else if operational == 0 && down > 0 {
         "down"
-    } else if down > 0 {
+    } else if down > 0 || projects.iter().any(|project| project.status == "degraded") {
         "degraded"
     } else {
         "unknown"
@@ -711,6 +891,8 @@ mod tests {
         ProjectStatus {
             name: "test".to_owned(),
             health_url: None,
+            services: vec![],
+            uses_service_probes: false,
             release: None,
             pending_release: None,
             config_error: None,
@@ -795,6 +977,8 @@ mod tests {
             Project {
                 name: "hello".to_owned(),
                 health_url: None,
+                has_service_probes: false,
+                service_names: vec![],
                 release: None,
                 pending_release: None,
                 config_error: None,
@@ -812,6 +996,8 @@ mod tests {
             Project {
                 name: "broken".to_owned(),
                 health_url: None,
+                has_service_probes: false,
+                service_names: vec![],
                 release: None,
                 pending_release: None,
                 config_error: Some("invalid TOML".to_owned()),
@@ -844,6 +1030,8 @@ mod tests {
             Project {
                 name: "hello".to_owned(),
                 health_url: Some(format!("http://{address}/health")),
+                has_service_probes: false,
+                service_names: vec![],
                 release: None,
                 pending_release: None,
                 config_error: None,
@@ -969,6 +1157,49 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_age_changes_project_health_without_a_new_cli_snapshot() {
+        let dir = temp_dir("service-age");
+        let mut snapshot: Value = serde_json::from_str(VALID_HOST).unwrap();
+        snapshot["services"] = serde_json::json!([{
+            "project": "demo", "service": "worker", "status": "healthy", "kind": "heartbeat",
+            "latency_ms": null, "age_seconds": 2, "heartbeat_at_unix": 1000,
+            "max_age_seconds": 30, "crit_multiplier": 3, "message": null,
+            "secret": "DO_NOT_EXPOSE"
+        }]);
+        fs::write(
+            dir.join("host.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        for (now, expected, age) in [
+            (1005, ServiceLevel::Healthy, 5),
+            (1031, ServiceLevel::Degraded, 31),
+            (1091, ServiceLevel::Unhealthy, 91),
+        ] {
+            let host = load_host(&dir, now, 300);
+            let service = &host.snapshot.as_ref().unwrap().services[0];
+            assert_eq!(service.status, expected);
+            assert_eq!(service.age_seconds, Some(age));
+            let mut payload = StatusPayload {
+                status: "unknown".into(),
+                checked_at: String::new(),
+                projects: vec![ProjectStatus {
+                    uses_service_probes: true,
+                    ..project("unknown")
+                }],
+                host,
+            };
+            payload.projects[0].name = "demo".into();
+            apply_service_snapshot(&mut payload);
+            assert_eq!(payload.projects[0].services[0].status, expected);
+            let json = serde_json::to_string(&payload).unwrap();
+            assert!(!json.contains("DO_NOT_EXPOSE"));
+            assert!(!json.contains("heartbeat_at_unix"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn status_http_response_preserves_all_host_metrics() {
         let dir = temp_dir("host-api-metrics");
         let mut snapshot: Value = serde_json::from_str(VALID_HOST).unwrap();
@@ -981,6 +1212,12 @@ mod tests {
             "value": {"images": "2GB", "containers": "1MB", "volumes": "3GB"},
             "status": "normal", "message": null
         });
+        fs::write(dir.join("demo.toml"), "[compose]\nservices = ['api', 'worker']\n[service_health.api]\ntype = 'http'\nurl = 'http://localhost/health'\ntimeout_ms = 1000\n[service_health.worker]\ntype = 'heartbeat'\npath = '/run/beat'\nmax_age_seconds = 30\n").unwrap();
+        let now = snapshot["collected_at_unix"].as_u64().unwrap();
+        snapshot["services"] = serde_json::json!([
+            {"project": "demo", "service": "api", "status": "healthy", "kind": "http", "latency_ms": 42, "age_seconds": null, "message": null},
+            {"project": "demo", "service": "worker", "status": "degraded", "kind": "heartbeat", "latency_ms": null, "age_seconds": 40, "heartbeat_at_unix": now - 40, "max_age_seconds": 30, "crit_multiplier": 2, "message": null}
+        ]);
         fs::write(
             dir.join("host.json"),
             serde_json::to_vec(&snapshot).unwrap(),
@@ -1025,6 +1262,16 @@ mod tests {
         }
         assert_eq!(exposed["load"]["value"], snapshot["load"]["value"]);
         assert_eq!(exposed["docker"]["value"], snapshot["docker"]["value"]);
+        assert_eq!(payload["projects"][0]["status"], "degraded");
+        assert_eq!(payload["projects"][0]["services"][0]["latency_ms"], 42);
+        assert!(
+            payload["projects"][0]["services"][1]["age_seconds"]
+                .as_u64()
+                .unwrap()
+                >= 40
+        );
+        assert_eq!(payload["projects"][0]["services"][1]["status"], "degraded");
+        assert_eq!(payload["status"], "degraded");
         assert!(!exposed.contains_key("secret"));
         fs::remove_dir_all(dir).unwrap();
     }

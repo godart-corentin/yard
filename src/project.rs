@@ -347,7 +347,7 @@ impl Project {
         vec![(self.config.image.tag_env.clone(), tag.to_owned())]
     }
 
-    fn compose_args(&self) -> Vec<String> {
+    pub(crate) fn compose_command_args(&self) -> Vec<String> {
         let mut args = vec!["compose".to_owned()];
         let env_file = self.config.compose_env_path();
         args.extend([
@@ -362,5 +362,9 @@ impl Project {
                 .into_owned(),
         ]);
         args
+    }
+
+    fn compose_args(&self) -> Vec<String> {
+        self.compose_command_args()
     }
 }

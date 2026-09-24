@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub deployment: DeploymentConfig,
+
+    #[serde(default)]
+    pub service_health: BTreeMap<String, ServiceProbe>,
 
     pub backup: Option<BackupConfig>,
 }
@@ -80,6 +84,13 @@ impl<'de> Deserialize<'de> for ComposeConfig {
 pub struct ImageConfig {
     pub name: String,
     pub tag_env: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ServiceProbe {
+    Http { url: String, timeout_ms: u64 },
+    Heartbeat { path: PathBuf, max_age_seconds: u64 },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,6 +188,43 @@ impl ProjectConfig {
                 "deployment.health_interval_seconds must be greater than zero".into(),
             ));
         }
+        for (name, probe) in &self.service_health {
+            if !self.compose.services.contains(name) {
+                return Err(YardError::Config(format!(
+                    "service_health.{name} is not a configured Compose service"
+                )));
+            }
+            match probe {
+                ServiceProbe::Http { url, timeout_ms } => {
+                    let valid = reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+                        matches!(parsed.scheme(), "http" | "https")
+                            && parsed.host().is_some()
+                            && parsed.username().is_empty()
+                            && parsed.password().is_none()
+                    });
+                    if !valid || *timeout_ms == 0 {
+                        return Err(YardError::Config(format!(
+                            "service_health.{name} requires an HTTP(S) URL without credentials and a positive timeout_ms"
+                        )));
+                    }
+                }
+                ServiceProbe::Heartbeat {
+                    path,
+                    max_age_seconds,
+                } => {
+                    if !path.is_absolute()
+                        || path
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                        || *max_age_seconds == 0
+                    {
+                        return Err(YardError::Config(format!(
+                            "service_health.{name} requires an absolute path without '..' and a positive max_age_seconds"
+                        )));
+                    }
+                }
+            }
+        }
         if let Some(backup) = &self.backup {
             if backup.command.is_empty() || backup.command[0].trim().is_empty() {
                 return Err(YardError::Config(
@@ -224,7 +272,7 @@ fn valid_service_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_env_name;
+    use super::{valid_env_name, ProjectConfig};
 
     #[test]
     fn validates_environment_variable_names() {
@@ -233,5 +281,25 @@ mod tests {
         assert!(!valid_env_name("2TAG"));
         assert!(!valid_env_name("APP-TAG"));
         assert!(!valid_env_name(""));
+    }
+
+    #[test]
+    fn service_probes_are_optional_but_must_target_configured_services() {
+        let base = "repo = '/srv/app'\nbranch = 'main'\n[compose]\ndirectory = '/srv/app'\nfile = 'compose.yml'\nenv_file = '.env'\nservices = ['api', 'worker']\n[image]\nname = 'app'\ntag_env = 'APP_TAG'\n";
+        let legacy: ProjectConfig = toml::from_str(base).unwrap();
+        legacy.validate().unwrap();
+        assert!(legacy.service_health.is_empty());
+        let configured = format!("{base}\n[service_health.api]\ntype = 'http'\nurl = 'http://127.0.0.1:8080/health'\ntimeout_ms = 800\n[service_health.worker]\ntype = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30\n");
+        let parsed: ProjectConfig = toml::from_str(&configured).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.service_health.len(), 2);
+        for bad in [
+            format!("{base}\n[service_health.other]\ntype = 'heartbeat'\npath = '/run/beat'\nmax_age_seconds = 30\n"),
+            format!("{base}\n[service_health.worker]\ntype = 'heartbeat'\npath = '../beat'\nmax_age_seconds = 30\n"),
+            format!("{base}\n[service_health.api]\ntype = 'http'\nurl = 'file:///etc/passwd'\ntimeout_ms = 800\n"),
+        ] {
+            let parsed: ProjectConfig = toml::from_str(&bad).unwrap();
+            assert!(parsed.validate().is_err());
+        }
     }
 }

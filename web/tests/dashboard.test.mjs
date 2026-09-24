@@ -127,3 +127,24 @@ test('host contains CPU, RAM, disk and measurement age, never Load or Docker car
   assert.equal(byClass(elements['host-metrics'], 'host-secondary').length, 0)
   assert.equal(elements['host-badge'].textContent, 'Normal')
 })
+
+test('probes stay with their project card and display real measurements', () => {
+  const elements = dashboard()
+  const withServices = structuredClone(payload)
+  withServices.projects[0].status = 'degraded'
+  withServices.projects[0].services = [
+    { service: 'api', status: 'healthy', kind: 'http', latency_ms: 42 },
+    { service: 'worker', status: 'unhealthy', kind: 'heartbeat', age_seconds: 94 }
+  ]
+  const context = { document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = render`, context)
+  context.renderForTest(withServices)
+  const cards = byClass(elements.projects, 'service-card')
+  const probes = byClass(cards[0], 'service-probe')
+  assert.equal(probes.length, 2)
+  assert.match(probes[0].textContent, /api.*Healthy.*42 ms/)
+  assert.match(probes[1].textContent, /worker.*Unhealthy.*94 s/)
+  assert.equal(byClass(cards[1], 'service-probe').length, 0)
+  assert.equal(elements['host-badge'].textContent, 'Normal')
+})

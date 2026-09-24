@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::command;
 use crate::project::Project;
+use crate::service_health::{self, ServiceHealth};
 
 pub const SNAPSHOT_FILE: &str = "host.json";
 static NEXT_SNAPSHOT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -128,6 +129,7 @@ pub struct Snapshot {
     pub containers: Vec<Container>,
     pub containers_status: Level,
     pub containers_message: Option<&'static str>,
+    pub services: Vec<ServiceHealth>,
 }
 
 fn parse_cpu(text: &str) -> Option<(u64, u64)> {
@@ -377,16 +379,26 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
     .map(|v| Metric::known(v, Level::Normal))
     .unwrap_or_else(|| Metric::unknown("Docker unavailable"));
     let mut containers = Vec::new();
+    let mut services = Vec::new();
     let mut containers_status = Level::Normal;
     let mut containers_message = None;
+    let service_thresholds = service_health::Thresholds::from_env();
     match Project::list(projects_dir) {
         Ok(names) => {
             for name in names {
-                match Project::load(&name, projects_dir, Path::new("/"))
-                    .ok()
+                let project = Project::load(&name, projects_dir, Path::new("/")).ok();
+                let found = project
+                    .as_ref()
                     .and_then(|p| p.compose_ps().ok())
-                    .and_then(|s| parse_containers(&name, &s))
-                {
+                    .and_then(|s| parse_containers(&name, &s));
+                if let Some(project) = project.as_ref() {
+                    services.extend(service_health::collect(
+                        project,
+                        found.as_deref(),
+                        service_thresholds,
+                    ));
+                }
+                match found {
                     Some(found) if !found.is_empty() => {
                         if found.iter().any(|c| c.status == Level::Critical) {
                             containers_status = Level::Critical;
@@ -433,6 +445,7 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
         containers,
         containers_status,
         containers_message,
+        services,
     }
 }
 
@@ -547,6 +560,7 @@ pub fn render(snapshot: &Snapshot) -> String {
     if let Some(message) = snapshot.containers_message {
         metric("Containers", message.into(), snapshot.containers_status);
     }
+    lines.push(service_health::render(&snapshot.services));
     lines.join("\n")
 }
 
@@ -594,6 +608,7 @@ mod tests {
             containers: vec![],
             containers_status: Level::Unknown,
             containers_message: Some("Containers unavailable"),
+            services: vec![],
         }
     }
 
