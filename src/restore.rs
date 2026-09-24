@@ -183,13 +183,22 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
         .into_iter()
         .flatten()
         .collect();
+    let available = releases
+        .iter()
+        .map(|release| format!("release:{}", release.tag))
+        .collect::<Vec<_>>()
+        .join(", ");
     let known = if let Some(tag) = target.strip_prefix("release:") {
         Some(
             releases
                 .iter()
                 .copied()
                 .find(|item| item.tag == tag)
-                .ok_or_else(|| YardError::Config(format!("no recorded release tagged {tag}")))?,
+                .ok_or_else(|| {
+                    YardError::Config(format!(
+                        "no recorded release tagged {tag}; available: {available}"
+                    ))
+                })?,
         )
     } else {
         let matches: Vec<_> = releases
@@ -205,7 +214,14 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
     let mut release = if let Some(known) = known {
         known.clone()
     } else {
-        let revision = project.resolve_revision(target)?;
+        let revision = project
+            .resolve_revision(target)
+            .map_err(|error| match error {
+                YardError::CommandFailed { .. } => {
+                    YardError::Config(format!("unknown revision {target}; available: {available}"))
+                }
+                other => other,
+            })?;
         [state.current.as_ref(), state.previous.as_ref()]
             .into_iter()
             .flatten()
@@ -220,6 +236,10 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
     if current.services.is_empty() {
         current.services = project.release_services(&current.tag)?;
     }
+    // Recorded state cannot authorize Compose services. Check both activation and
+    // failure-recovery paths before snapshots or runtime changes.
+    validate_application_release(project, &release)?;
+    validate_application_release(project, &current)?;
     if project.current_tag_from_env()?.as_deref() != Some(current.tag.as_str())
         && state.pending.is_none()
     {
@@ -284,6 +304,33 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
     state.save(&project.state_path).map_err(|error| YardError::Config(format!(
         "application activated but state could not be saved ({error}); inspect runtime and snapshot {} before retrying",
         snapshot.display())))?;
+    Ok(())
+}
+
+fn validate_application_release(project: &Project, release: &Release) -> Result<()> {
+    let allowed = &project.config.compose.services;
+    let migration = project.config.deployment.migration_service.as_deref();
+    let names: Vec<_> = release
+        .services
+        .iter()
+        .map(|service| service.name.as_str())
+        .collect();
+    if names.len() != allowed.len()
+        || names
+            .iter()
+            .any(|name| migration == Some(*name) || !allowed.iter().any(|allowed| allowed == name))
+        || allowed
+            .iter()
+            .any(|name| names.iter().filter(|recorded| **recorded == name).count() != 1)
+    {
+        return Err(YardError::Config(format!(
+            "release:{} services [{}] do not match authorized application services [{}] (migration service: {}); refusing to activate data, migration or unconfigured services. {MANUAL}",
+            release.tag,
+            names.join(", "),
+            allowed.join(", "),
+            migration.unwrap_or("none")
+        )));
+    }
     Ok(())
 }
 
