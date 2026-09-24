@@ -367,6 +367,182 @@ fn explicit_restore_guards_and_preserves_state() {
 }
 
 #[test]
+fn unknown_restore_target_names_available_releases_without_activation() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let state = fixture.state();
+    let known = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    let before_docker = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    for target in ["release:unknown", "not-a-git-revision"] {
+        let result = fixture.run_with_args("restore", &[target, "--yes"]);
+        assert!(!result.status.success());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(error.contains(&known), "{error}");
+        assert_eq!(fixture.state(), state);
+    }
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("docker.log")).unwrap(),
+        before_docker
+    );
+}
+
+#[test]
+fn restore_refuses_recorded_data_service_before_activation_or_snapshot() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let mut state = fixture.state();
+    let target = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    state["previous"]["services"] = serde_json::json!([{
+        "name": "postgres", "image": format!("demo-postgres:{}", state["previous"]["tag"].as_str().unwrap())
+    }]);
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    let before_docker = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("postgres") && error.contains("api"),
+        "{error}"
+    );
+    assert_eq!(fixture.state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("docker.log")).unwrap(),
+        before_docker
+    );
+    assert!(!fs::read_dir(fixture.root.join("state"))
+        .unwrap()
+        .any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".restore-")
+        }));
+    let audit = fs::read_to_string(fixture.root.join("state/demo.restore.jsonl")).unwrap();
+    assert!(audit.contains("postgres") && audit.contains("refused_or_failed"));
+}
+
+#[test]
+fn restore_refuses_data_service_in_recovery_release() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let mut state = fixture.state();
+    let target = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    state["current"]["services"][0]["name"] = "postgres".into();
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    let before_docker = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("postgres"));
+    assert_eq!(fixture.state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("docker.log")).unwrap(),
+        before_docker
+    );
+}
+
+#[test]
+fn restore_refuses_migration_service_even_if_listed_as_application() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let mut state = fixture.state();
+    let target = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    state["previous"]["services"][0]["name"] = "migrate".into();
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    let path = fixture.root.join("projects/demo.toml");
+    let manifest = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        format!("{manifest}\n[deployment]\nmigration_service = \"migrate\"\n"),
+    )
+    .unwrap();
+    let before_docker = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("migrate"));
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("docker.log")).unwrap(),
+        before_docker
+    );
+}
+
+#[test]
+fn restore_refuses_migration_service_even_when_currently_whitelisted() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let state = fixture.state();
+    let target = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    let path = fixture.root.join("projects/demo.toml");
+    let manifest = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        format!("{manifest}\n[deployment]\nmigration_service = \"api\"\n"),
+    )
+    .unwrap();
+    let before_docker = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("migration service: api"));
+    assert_eq!(fixture.state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("docker.log")).unwrap(),
+        before_docker
+    );
+}
+
+#[test]
+fn restore_populates_legacy_release_services_and_preserves_multiple_apps() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let mut state = fixture.state();
+    let target = format!("release:{}", state["previous"]["tag"].as_str().unwrap());
+    state["previous"]
+        .as_object_mut()
+        .unwrap()
+        .remove("services");
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        serde_json::to_string(&state).unwrap(),
+    )
+    .unwrap();
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let restored = fixture.state();
+    assert_eq!(restored["current"]["services"].as_array().unwrap().len(), 2);
+    let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    assert!(log.contains("up -d --no-build --no-deps api | old"));
+    assert!(log.contains("up -d --no-build --no-deps worker | old"));
+}
+
+#[test]
 fn restore_points_report_unreadable_backup_record() {
     let fixture = Fixture::new();
     fixture.setup_repo();
