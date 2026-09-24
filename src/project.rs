@@ -17,6 +17,11 @@ pub struct Project {
 
 impl Project {
     pub fn load(name: &str, projects_dir: &Path, state_dir: &Path) -> Result<Self> {
+        if name == "host" {
+            return Err(YardError::Config(
+                "project name 'host' is reserved for the host snapshot".into(),
+            ));
+        }
         let path = projects_dir.join(format!("{name}.toml"));
         if !path.is_file() {
             return Err(YardError::ProjectNotFound(name.to_owned()));
@@ -41,6 +46,9 @@ impl Project {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                if stem == "host" {
+                    continue;
+                }
                 names.push(stem.to_owned());
             }
         }
@@ -198,7 +206,12 @@ impl Project {
 
     pub fn compose_ps(&self) -> Result<String> {
         let mut args = self.compose_args();
-        args.extend(["ps".to_owned(), "--format".to_owned(), "json".to_owned()]);
+        args.extend([
+            "ps".to_owned(),
+            "--all".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ]);
         command::checked("docker", &args, Some(&self.config.compose.directory), &[])
     }
 

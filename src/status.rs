@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::time::SystemTime;
 
 use serde::Deserialize;
 
 use crate::error::Result;
+use crate::host;
 use crate::project::Project;
 use crate::state::{ProjectState, Release};
 
@@ -20,11 +22,11 @@ struct ComposeService {
     image: String,
 }
 
-pub fn run(project: &Project) -> Result<()> {
+pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<()> {
     let state = ProjectState::load(&project.state_path)?;
     let head = project.head_revision()?;
     let branch = project.current_branch()?;
-    let env_tag = project.current_tag_from_env()?;
+    let env_tag = project.current_tag_from_env().ok().flatten();
 
     println!("Project: {}", project.name);
     println!(
@@ -87,35 +89,43 @@ pub fn run(project: &Project) -> Result<()> {
 
     println!();
     println!("Docker Compose");
-    let services = parse_compose_services(&project.compose_ps()?)?;
-    if services.is_empty() {
-        println!("  (no containers)");
-    } else {
-        let service_width = services
-            .iter()
-            .map(ComposeService::display_name)
-            .map(str::len)
-            .max()
-            .unwrap_or(7)
-            .max(7);
-        let status_width = services
-            .iter()
-            .map(ComposeService::display_status)
-            .map(str::len)
-            .max()
-            .unwrap_or(6)
-            .max(6);
+    let services = project
+        .compose_ps()
+        .ok()
+        .and_then(|output| parse_compose_services(&output).ok());
+    if let Some(services) = services {
+        if services.is_empty() {
+            println!("  (no containers)");
+        } else {
+            let service_width = services
+                .iter()
+                .map(ComposeService::display_name)
+                .map(str::len)
+                .max()
+                .unwrap_or(7)
+                .max(7);
+            let status_width = services
+                .iter()
+                .map(ComposeService::display_status)
+                .map(str::len)
+                .max()
+                .unwrap_or(6)
+                .max(6);
 
-        for service in &services {
-            println!(
-                "  {:<service_width$}  {:<status_width$}  {}",
-                service.display_name(),
-                service.display_status(),
-                service.display_image(),
-            );
+            for service in &services {
+                println!(
+                    "  {:<service_width$}  {:<status_width$}  {}",
+                    service.display_name(),
+                    service.display_status(),
+                    service.display_image(),
+                );
+            }
         }
+    } else {
+        println!("  unavailable [Unknown]");
     }
-
+    println!();
+    host::run(projects_dir, state_dir);
     Ok(())
 }
 

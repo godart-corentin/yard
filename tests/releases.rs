@@ -183,7 +183,7 @@ case " $* " in
       printf '{"services":{"api":{"image":"demo-api:%s"},"worker":{"image":"demo-worker:%s"}}}\n' "$IMAGE_TAG" "$IMAGE_TAG"
     fi ;;
   *" image inspect "*) exit 0 ;;
-  *" ps --format json "*)
+  *" ps --all --format json "*)
     for service in api worker; do
       if [ -f "$FAKE_ROOT/running-$service" ]; then
         image=$(sed -n '1p' "$FAKE_ROOT/running-$service")

@@ -7,6 +7,7 @@ Yard gives a single-server homelab a consistent operational interface without in
 ```bash
 yard list
 yard status hello-api
+yard host
 yard deploy hello-api
 yard rollback hello-api
 yard logs hello-api
@@ -158,8 +159,11 @@ Secrets do **not** belong in Yard manifests. Keep them in the application's own 
 # Discover configured projects
 yard list
 
-# Inspect Git, deployment state and Compose containers
+# Inspect Git, deployment state, Compose containers and host metrics
 yard status hello-api
+
+# Inspect only the host and refresh the Web snapshot
+yard host
 
 # Deploy the configured branch
 yard deploy hello-api
@@ -188,6 +192,24 @@ yard --projects-dir ./projects --state-dir ./state list
 
 or with `YARD_PROJECTS_DIR` and `YARD_STATE_DIR`.
 
+### Host monitoring
+
+`yard status <project>` ends with a `HOST` section; `yard host` shows the same section without a project. It reports CPU utilization and load, RAM, physical filesystem usage, Docker images/containers/volumes usage, and the state of configured Yard Compose containers. For example:
+
+```text
+HOST
+  CPU          45.0% [Normal]
+  Load         1.00 / 2.00 / 3.00 [Normal]
+  RAM          1.0 GiB / 2.0 GiB [Warning]
+  Disk         /: 8.2 GiB / 10.0 GiB [Warning]
+  Docker       images 2GB, containers 1MB, volumes 3GB [Normal]
+  Container    hello-api / api: exited [Critical]
+```
+
+By default, disk usage strictly above 80% is `Warning`, strictly above 90% is `Critical`, RAM usage strictly above 85% is `Warning`, and a stopped container is `Critical`. At the exact threshold the lower level still applies. A configured project with no Compose containers yet is `Unknown` ("No containers for a configured project"), not `Critical`; this status is preserved in the CLI, snapshot and Web view. Override thresholds with `YARD_DISK_WARN_PERCENT`, `YARD_DISK_CRIT_PERCENT`, and `YARD_MEM_PRESSURE_PERCENT` (integers 0–100); invalid values use defaults. A missing measurement is `Unknown`, not a failed command. Physical mounts come from Linux mountinfo; container overlay filesystems are not treated as host disks.
+
+Each CLI collection atomically replaces `host.json` in the state directory (`--state-dir` / `YARD_STATE_DIR`), including when collections overlap. If saving fails, the CLI reports the error on stderr but still displays the host status. The project name `host` is reserved to avoid colliding with this snapshot. The file has a version, collection timestamp, applied thresholds, metrics and computed statuses, but no application environment or secrets. Web only reads this snapshot; it never measures the host itself. A regular external scheduler can run `yard host` to keep the Web view current; Yard installs no timer or service.
+
 ## Yard Web
 
 Yard Web is an optional private dashboard for the projects already registered in Yard.
@@ -197,10 +219,12 @@ It reads:
 - the project inventory from `/etc/yard/projects/*.toml`;
 - `deployment.health_url` for the current HTTP health check;
 - `/var/lib/yard/<project>.json` for the deployed release metadata.
+- `/var/lib/yard/host.json` for the last CLI-produced host snapshot, when available.
 
 A project without `deployment.health_url` still appears, but its health is reported as `Unknown`.
 
 The dashboard shows projects as a responsive card grid with current health, latency, HTTP status, last check, and deployed release information when available.
+It also displays host metrics and their precomputed states with the measurement age. After five minutes without a new snapshot, or if the file is unreadable or incompatible, host data is explicitly unavailable while project health remains functional. Set `YARD_WEB_HOST_MAX_AGE_SECONDS` to override the five-minute freshness limit.
 
 ### Install Yard Web
 

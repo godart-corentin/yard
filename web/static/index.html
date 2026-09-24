@@ -51,13 +51,24 @@
           <strong id="operational-count" class="summary-value good">—</strong>
         </div>
         <div class="summary-item">
-          <span class="summary-label">Down</span>
+          <span class="summary-label">Attention</span>
           <strong id="down-count" class="summary-value">—</strong>
         </div>
         <div class="summary-item summary-time">
           <span class="summary-label">Last refresh</span>
           <time id="checked-at" class="summary-value summary-value-time">Checking…</time>
         </div>
+      </section>
+
+      <section aria-labelledby="host-title">
+        <div class="section-title">
+          <div>
+            <h1 id="host-title">Host</h1>
+            <p id="host-age">Waiting for a host snapshot…</p>
+          </div>
+          <div id="host-badge" class="badge unknown">Unknown</div>
+        </div>
+        <div id="host-metrics" class="host-metrics" aria-live="polite"></div>
       </section>
 
       <section aria-labelledby="services-title">

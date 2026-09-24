@@ -23,7 +23,7 @@ test('card shows each release image and warns about interrupted activation', () 
     createElement: element
   }
   const source = fs.readFileSync(__dirname + '/app.js', 'utf8')
-  const card = vm.runInNewContext(source + '\nrenderProject({ name: "demo", status: "operational", release: { tag: "old", services: [{ name: "api", image: "api:old" }, { name: "worker", image: "worker:old" }] }, pending_release: { tag: "new", status: "activating" } })', {
+  const card = vm.runInNewContext(source + '\nrenderProject({ name: "demo", status: "operational", release: { tag: "old", services: [{ name: "api", image: "api:old" }, { name: "worker", image: "worker:old" }] }, pending_release: { tag: "new", status: "activating" } }, [{ project: "demo", service: "api", state: "running", status: "normal" }])', {
     document, fetch: () => new Promise(() => {}), setInterval: () => 0
   })
   const text = texts(card)
@@ -33,4 +33,7 @@ test('card shows each release image and warns about interrupted activation', () 
   assert.match(text, /worker:old/)
   assert.match(text, /activating/)
   assert.match(text, /new/)
+  const containers = card.children.find((child) => child.className === 'service-containers')
+  assert.ok(containers)
+  assert.match(texts(containers), /api running Operational/)
 })

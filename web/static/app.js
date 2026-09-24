@@ -5,6 +5,9 @@ const operationalCountEl = document.querySelector('#operational-count')
 const downCountEl = document.querySelector('#down-count')
 const checkedAtEl = document.querySelector('#checked-at')
 const refreshEl = document.querySelector('#refresh')
+const hostMetricsEl = document.querySelector('#host-metrics')
+const hostBadgeEl = document.querySelector('#host-badge')
+const hostAgeEl = document.querySelector('#host-age')
 
 const labels = {
   operational: 'Operational',
@@ -48,6 +51,65 @@ const statusBadge = (status) => {
   return badge
 }
 
+const hostStatus = (status) => ({ normal: 'operational', warning: 'degraded', critical: 'down' }[status] || 'unknown')
+const hostLabel = (status) => ({ normal: 'Normal', warning: 'Warning', critical: 'Critical' }[status] || 'Unknown')
+const hostBadge = (status) => {
+  const badge = statusBadge(hostStatus(status))
+  badge.textContent = hostLabel(status)
+  return badge
+}
+const formatBytes = (bytes) => `${(bytes / (1024 ** 3)).toFixed(1)} GiB`
+const level = (status) => ({ critical: 3, warning: 2, unknown: 1, normal: 0 }[status] ?? 1)
+const serviceState = (project, containers) => {
+  if (project.status === 'down') return 'down'
+  if (containers.some((container) => container.status === 'critical')) return 'degraded'
+  return labels[project.status] ? project.status : 'unknown'
+}
+
+const renderHost = (host) => {
+  hostMetricsEl.replaceChildren()
+  const age = host?.age_seconds
+  hostAgeEl.textContent = age == null ? 'Measurement unavailable' : `Measured ${age} seconds ago${host.status === 'available' ? '' : ' — stale'}`
+  const snapshot = host?.status === 'available' ? host.snapshot : null
+  hostBadgeEl.className = 'badge unknown'
+  hostBadgeEl.textContent = 'Unknown'
+  if (!snapshot) {
+    const empty = document.createElement('div')
+    empty.className = 'empty'
+    empty.textContent = host?.message || 'Host snapshot unavailable'
+    hostMetricsEl.append(empty)
+    return
+  }
+
+  const addMetric = (label, metric, value) => {
+    const card = document.createElement('div')
+    card.className = 'host-metric'
+    const header = document.createElement('div')
+    header.className = 'host-metric-header'
+    const name = document.createElement('strong')
+    name.textContent = label
+    header.append(name, hostBadge(metric?.status))
+    const detail = document.createElement('p')
+    detail.textContent = value || metric?.message || 'Unavailable'
+    card.append(header, detail)
+    hostMetricsEl.append(card)
+  }
+  // Container and Docker diagnostics remain in the API, not in the host badge.
+  const states = [snapshot.cpu.status, snapshot.memory.status,
+    ...snapshot.disks.map((disk) => disk.status)]
+  const overall = states.reduce((highest, status) => level(status) > level(highest) ? status : highest, 'normal')
+  hostBadgeEl.className = `badge ${hostStatus(overall)}`
+  hostBadgeEl.textContent = hostLabel(overall)
+
+  addMetric('CPU', snapshot.cpu, snapshot.cpu.value == null ? null : `${snapshot.cpu.value.toFixed(1)}%`)
+  const memory = snapshot.memory.value
+  addMetric('RAM', snapshot.memory, memory ? `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}` : null)
+  for (const disk of snapshot.disks) {
+    const value = disk.value
+    addMetric(`Disk ${value?.mount || ''}`, disk, value ? `${formatBytes(value.used_bytes)} / ${formatBytes(value.total_bytes)}` : null)
+  }
+}
+
 const externalLink = (label, value, className = '') => {
   let url
   try {
@@ -83,7 +145,7 @@ const addFact = (list, label, value, className = '') => {
   list.append(item)
 }
 
-const renderProject = (project) => {
+const renderProject = (project, containers) => {
   const card = document.createElement('article')
   card.className = 'service-card'
 
@@ -92,7 +154,7 @@ const renderProject = (project) => {
   const name = document.createElement('h2')
   name.className = 'service-name'
   name.textContent = project.name || 'Unnamed service'
-  header.append(name, statusBadge(project.status))
+  header.append(name, statusBadge(serviceState(project, containers)))
 
   const endpoints = document.createElement('div')
   endpoints.className = 'endpoints'
@@ -168,6 +230,25 @@ const renderProject = (project) => {
 
   card.append(header, endpoints, facts, releaseBlock)
 
+  if (containers.length) {
+    const group = document.createElement('div')
+    group.className = 'service-containers'
+    const label = document.createElement('h3')
+    label.textContent = 'Containers'
+    group.append(label)
+    for (const container of containers) {
+      const row = document.createElement('div')
+      row.className = 'container-row'
+      const containerName = document.createElement('strong')
+      containerName.textContent = container.service
+      const state = document.createElement('span')
+      state.className = 'container-state'
+      state.textContent = container.status === 'critical' ? 'Stopped' : container.state
+      row.append(containerName, state, statusBadge(container.status === 'critical' ? 'down' : 'operational'))
+      group.append(row)
+    }
+    card.append(group)
+  }
   if (Array.isArray(release.services)) {
     const images = document.createElement('div')
     images.className = 'service-facts'
@@ -193,16 +274,20 @@ const renderProject = (project) => {
   return card
 }
 
-const updateSummary = (payload) => {
+const updateSummary = (payload, containers) => {
   const projects = Array.isArray(payload.projects) ? payload.projects : []
-  const operational = projects.filter((project) => project.status === 'operational').length
-  const down = projects.filter((project) => project.status === 'down').length
-  const status = labels[payload.status] ? payload.status : 'unknown'
+  const states = projects.map((project) => serviceState(project,
+    containers.filter((container) => container.project === project.name)))
+  const operational = states.filter((state) => state === 'operational').length
+  const down = states.filter((state) => state === 'down').length
+  const attention = states.length - operational
+  const status = !projects.length ? 'unknown' : operational === projects.length ? 'operational'
+    : operational === 0 && down > 0 ? 'down' : down > 0 || states.includes('degraded') ? 'degraded' : 'unknown'
 
   totalCountEl.textContent = String(projects.length)
   operationalCountEl.textContent = String(operational)
-  downCountEl.textContent = String(down)
-  downCountEl.classList.toggle('bad', down > 0)
+  downCountEl.textContent = String(attention)
+  downCountEl.classList.toggle('bad', attention > 0)
   checkedAtEl.textContent = formatTime(payload.checked_at)
   const checkedDate = toDate(payload.checked_at)
   checkedAtEl.dateTime = checkedDate ? checkedDate.toISOString() : ''
@@ -211,8 +296,11 @@ const updateSummary = (payload) => {
 }
 
 const render = (payload) => {
+  renderHost(payload.host)
   const projects = Array.isArray(payload.projects) ? payload.projects : []
-  updateSummary({ ...payload, projects })
+  const snapshot = payload.host?.status === 'available' ? payload.host.snapshot : null
+  const containers = snapshot?.containers || []
+  updateSummary({ ...payload, projects }, containers)
 
   projectsEl.replaceChildren()
   projectsEl.setAttribute('aria-busy', 'false')
@@ -226,11 +314,18 @@ const render = (payload) => {
   }
 
   for (const project of projects) {
-    projectsEl.append(renderProject(project))
+    projectsEl.append(renderProject(project, containers.filter((container) => container.project === project.name)))
+  }
+  if (snapshot?.containers_message) {
+    const notice = document.createElement('div')
+    notice.className = 'service-notice'
+    notice.textContent = snapshot.containers_message
+    projectsEl.append(notice)
   }
 }
 
 const renderError = (error) => {
+  renderHost(null)
   totalCountEl.textContent = '—'
   operationalCountEl.textContent = '—'
   downCountEl.textContent = '—'

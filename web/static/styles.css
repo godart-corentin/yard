@@ -240,6 +240,34 @@ a:focus-visible {
   color: #c4cbd4;
 }
 
+.host-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 38px;
+}
+
+.host-metric {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.host-metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.host-metric p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
 .projects {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -364,6 +392,59 @@ a:focus-visible {
   padding-top: 15px;
 }
 
+.service-containers {
+  display: grid;
+  gap: 7px;
+  margin-top: 15px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border);
+}
+
+.service-containers h3 {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.container-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.container-row strong {
+  overflow-wrap: anywhere;
+}
+
+.container-state {
+  color: var(--muted);
+}
+
+.container-row:has(.badge.down) {
+  border-color: #70404c;
+  background: #281b20;
+}
+
+.container-row:has(.badge.down) .container-state {
+  color: #fda4af;
+}
+
+.service-notice {
+  grid-column: 1 / -1;
+  color: var(--warn);
+  font-size: 12px;
+}
+
 .release-copy {
   min-width: 0;
 }
@@ -424,12 +505,20 @@ a:focus-visible {
 }
 
 @media (max-width: 900px) {
+  .host-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .projects {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 680px) {
+  .host-metrics {
+    grid-template-columns: 1fr;
+  }
+
   .shell {
     width: min(100% - 28px, 1180px);
     padding-top: 22px;

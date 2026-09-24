@@ -6,6 +6,7 @@ mod deploy;
 mod envfile;
 mod error;
 mod health;
+mod host;
 mod project;
 mod rollback;
 mod state;
@@ -60,8 +61,9 @@ fn run() -> Result<()> {
         }
         Command::Status { project } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
-            status::run(&project)?;
+            status::run(&project, &projects_dir, &state_dir)?;
         }
+        Command::Host => host::run(&projects_dir, &state_dir),
         Command::Deploy { project } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
             deploy::run(&project)?;
