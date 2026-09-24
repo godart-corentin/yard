@@ -135,8 +135,8 @@ fn http_probe_reports_latency_and_failure_without_docker_health_assumptions() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut bytes = [0; 1024];
-        stream.read(&mut bytes).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .unwrap();
@@ -153,8 +153,8 @@ fn http_probe_reports_latency_and_failure_without_docker_health_assumptions() {
     let bad_port = bad_listener.local_addr().unwrap().port();
     let bad_server = thread::spawn(move || {
         let (mut stream, _) = bad_listener.accept().unwrap();
-        let mut bytes = [0; 1024];
-        stream.read(&mut bytes).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
         stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
     });
     fs::write(root.join("projects/demo.toml"), manifest(bad_port)).unwrap();
@@ -167,8 +167,8 @@ fn http_probe_reports_latency_and_failure_without_docker_health_assumptions() {
     let slow_port = slow_listener.local_addr().unwrap().port();
     let slow_server = thread::spawn(move || {
         let (mut stream, _) = slow_listener.accept().unwrap();
-        let mut bytes = [0; 1024];
-        stream.read(&mut bytes).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
         thread::sleep(std::time::Duration::from_millis(500));
     });
     fs::write(root.join("projects/demo.toml"), manifest(slow_port)).unwrap();

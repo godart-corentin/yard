@@ -563,6 +563,22 @@ a:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .service-probe {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .service-probe strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .service-probe .container-state {
+    grid-column: 1 / -1;
+    overflow-wrap: anywhere;
+  }
+
   .section-title {
     align-items: flex-start;
   }
