@@ -135,6 +135,10 @@ health_interval_seconds = 2
 
 [backup]
 command = ["/usr/local/sbin/hello-api-backup"]
+# Optional: execute only after the local command succeeds (no shell is used).
+# The destination is descriptive metadata; Yard cannot infer it from the command.
+offsite_command = ["/usr/local/sbin/hello-api-offsite-copy"]
+offsite_destination = "remote:hello-api"
 ```
 
 The corresponding Compose service should use the configured tag environment variable, for example:
@@ -152,6 +156,8 @@ This is how Yard builds immutable application images tagged with the Git revisio
 For a release spanning multiple Compose services, use `services = ["api", "worker"]` instead of `service = "api"` in `[compose]` (see [`examples/hello-api-worker.toml`](examples/hello-api-worker.toml)). The historical `service` key remains supported and is treated as a one-item list; specifying both keys is an error. The list must not be empty and names must be distinct, nonempty Compose service identifiers. Each listed service needs its own `image:` reference incorporating the shared `[image].tag_env` (for example `hello-api:${HELLO_API_IMAGE_TAG:-local}` and `hello-worker:${HELLO_API_IMAGE_TAG:-local}`), plus a `build:` section. Yard resolves the actual image references via `docker compose config`, so `[image].name` remains required for historical manifests but does not force a single image name across services.
 
 Secrets do **not** belong in Yard manifests. Keep them in the application's own protected environment or secret files.
+
+Yard records the latest local backup attempt and the separate off-site copy attempt in the project state. `yard status` and the Web dashboard show the outcome, start time, duration and configured destination. If `backup.directory` or `backup.offsite_destination` is omitted, the destination is unknown; Yard does not infer a file, size or file count from the command or existing files. Without a recorded run, both views say so explicitly. An off-site failure is recorded separately and makes the command fail (and stops deploy/rollback before activation), while the local attempt remains a success. An unsuccessful local backup skips the off-site command. Existing manifests need no changes.
 
 ## Commands
 

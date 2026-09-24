@@ -52,8 +52,8 @@ const metric = (status, value) => ({ status, value, message: null })
 const payload = {
   checked_at: '2026-09-24T12:00:00Z',
   projects: [
-    { name: 'hello-api', status: 'operational' },
-    { name: 'wiki', status: 'down', error: 'HTTP 503' }
+    { name: 'hello-api', status: 'operational', offsite_configured: false },
+    { name: 'wiki', status: 'down', error: 'HTTP 503', offsite_configured: false }
   ],
   host: {
     status: 'available',
@@ -106,6 +106,25 @@ test('each container appears only within its own service, with its state', () =>
   assert.deepEqual(cards.map(card => byClass(card, 'container-row').map(row => row.children[2].textContent)),
     [['Operational', 'Down'], ['Operational']])
   assert.equal(byClass(elements['host-metrics'], 'container-row').length, 0)
+})
+
+test('backup results remain separate and missing information is explicit', () => {
+  const cards = byClass(dashboard().projects, 'service-card')
+  const first = byClass(cards[0], 'backup-facts')[0]
+  assert.match(first.textContent, /Local backupNo backup recorded/)
+  assert.match(first.textContent, /Off-site copyNot configured/)
+  const attempt = { started_at_unix: 1790251200, duration_ms: 42, result: 'success', destination: '/archives' }
+  const failed = { ...attempt, result: 'failure', destination: 'remote:test' }
+  const context = {
+    document: { querySelector: () => new Element(), createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}
+  }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = renderProject`, context)
+  const block = context.renderForTest({ name: 'demo', status: 'operational', last_backup: attempt, last_offsite: failed, offsite_configured: true }, [])
+  const facts = byClass(block, 'backup-facts')[0]
+  assert.match(facts.textContent, /Local backupSuccess.*\/archives/)
+  assert.match(facts.textContent, /Off-site copyFailure.*remote:test/)
+  assert.equal(byClass(facts, 'bad').length, 1)
 })
 
 test('stopped worker degrades only its service and summary, not the host', () => {

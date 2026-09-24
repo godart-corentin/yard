@@ -88,7 +88,8 @@ fn run() -> Result<()> {
                     project.name
                 )));
             }
-            project.run_backup()?;
+            let mut state = state::ProjectState::load(&project.state_path)?;
+            project.run_backup(&mut state)?;
         }
     }
 

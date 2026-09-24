@@ -1,12 +1,12 @@
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
 use crate::error::Result;
 use crate::host;
 use crate::project::Project;
-use crate::state::{ProjectState, Release};
+use crate::state::{BackupAttempt, ProjectState, Release};
 
 #[derive(Debug, Deserialize)]
 struct ComposeService {
@@ -67,24 +67,22 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
 
     println!();
     println!("Backup");
-    match project.last_backup()? {
-        Some((path, modified)) => {
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("(unknown)");
-            println!("  {:<9} {:<9} {}", "last", format_age(modified), name);
-        }
-        None if project
-            .config
-            .backup
-            .as_ref()
-            .and_then(|backup| backup.directory.as_ref())
-            .is_some() =>
-        {
-            println!("  {:<9} none", "last");
-        }
-        None => println!("  {:<9} not configured", "last"),
+    match &state.last_backup {
+        Some(attempt) => print_backup("Local", attempt),
+        None => println!("  No backup recorded"),
+    }
+    if project
+        .config
+        .backup
+        .as_ref()
+        .and_then(|backup| backup.offsite_command.as_ref())
+        .is_none()
+    {
+        println!("  Off-site: not configured");
+    } else if let Some(attempt) = &state.last_offsite {
+        print_backup("Off-site", attempt);
+    } else {
+        println!("  Off-site: no copy recorded for the last local backup");
     }
 
     println!();
@@ -127,6 +125,19 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
     println!();
     host::run(projects_dir, state_dir);
     Ok(())
+}
+
+fn print_backup(label: &str, attempt: &BackupAttempt) {
+    let destination = attempt
+        .destination
+        .as_deref()
+        .unwrap_or("unknown destination");
+    println!(
+        "  {label}: {} — {} — {destination} ({} ms)",
+        attempt.result.label(),
+        format_age(UNIX_EPOCH + Duration::from_secs(attempt.started_at_unix)),
+        attempt.duration_ms,
+    );
 }
 
 fn print_release(label: &str, release: Option<&Release>) {
