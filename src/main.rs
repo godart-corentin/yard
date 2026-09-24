@@ -7,6 +7,7 @@ mod envfile;
 mod error;
 mod health;
 mod host;
+mod images;
 mod project;
 mod rollback;
 mod service_health;
@@ -65,6 +66,7 @@ fn run() -> Result<()> {
             status::run(&project, &projects_dir, &state_dir)?;
         }
         Command::Host => host::run(&projects_dir, &state_dir),
+        Command::Images { prune, yes } => images::run(&projects_dir, &state_dir, prune && yes)?,
         Command::Deploy { project } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
             deploy::run(&project)?;
