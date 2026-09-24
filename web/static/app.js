@@ -5,6 +5,9 @@ const operationalCountEl = document.querySelector('#operational-count')
 const downCountEl = document.querySelector('#down-count')
 const checkedAtEl = document.querySelector('#checked-at')
 const refreshEl = document.querySelector('#refresh')
+const hostMetricsEl = document.querySelector('#host-metrics')
+const hostBadgeEl = document.querySelector('#host-badge')
+const hostAgeEl = document.querySelector('#host-age')
 
 const labels = {
   operational: 'Operational',
@@ -46,6 +49,66 @@ const statusBadge = (status) => {
   badge.className = `badge ${resolvedStatus}`
   badge.textContent = labels[resolvedStatus]
   return badge
+}
+
+const hostStatus = (status) => ({ normal: 'operational', warning: 'degraded', critical: 'down' }[status] || 'unknown')
+const hostLabel = (status) => ({ normal: 'Normal', warning: 'Warning', critical: 'Critical' }[status] || 'Unknown')
+const hostBadge = (status) => {
+  const badge = statusBadge(hostStatus(status))
+  badge.textContent = hostLabel(status)
+  return badge
+}
+const formatBytes = (bytes) => `${(bytes / (1024 ** 3)).toFixed(1)} GiB`
+
+const renderHost = (host) => {
+  hostMetricsEl.replaceChildren()
+  const age = host?.age_seconds
+  hostAgeEl.textContent = age == null ? 'Measurement unavailable' : `Measured ${age} seconds ago${host.status === 'available' ? '' : ' — stale'}`
+  const snapshot = host?.status === 'available' ? host.snapshot : null
+  hostBadgeEl.className = 'badge unknown'
+  hostBadgeEl.textContent = 'Unknown'
+  if (!snapshot) {
+    const empty = document.createElement('div')
+    empty.className = 'empty'
+    empty.textContent = host?.message || 'Host snapshot unavailable'
+    hostMetricsEl.append(empty)
+    return
+  }
+
+  const addMetric = (label, metric, value) => {
+    const card = document.createElement('div')
+    card.className = 'host-metric'
+    const header = document.createElement('div')
+    header.className = 'host-metric-header'
+    const name = document.createElement('strong')
+    name.textContent = label
+    header.append(name, hostBadge(metric?.status))
+    const detail = document.createElement('p')
+    detail.textContent = value || metric?.message || 'Unavailable'
+    card.append(header, detail)
+    hostMetricsEl.append(card)
+  }
+  const level = (status) => ({ critical: 3, warning: 2, unknown: 1, normal: 0 }[status] ?? 1)
+  const states = [snapshot.cpu.status, snapshot.load.status, snapshot.memory.status,
+    ...snapshot.disks.map((disk) => disk.status), snapshot.docker.status, snapshot.containers_status]
+  const overall = states.reduce((highest, status) => level(status) > level(highest) ? status : highest, 'normal')
+  hostBadgeEl.className = `badge ${hostStatus(overall)}`
+  hostBadgeEl.textContent = hostLabel(overall)
+
+  addMetric('CPU', snapshot.cpu, snapshot.cpu.value == null ? null : `${snapshot.cpu.value.toFixed(1)}%`)
+  addMetric('Load (1 / 5 / 15 min)', snapshot.load, snapshot.load.value?.map((v) => v.toFixed(2)).join(' / '))
+  const memory = snapshot.memory.value
+  addMetric('RAM', snapshot.memory, memory ? `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}` : null)
+  for (const disk of snapshot.disks) {
+    const value = disk.value
+    addMetric(`Disk ${value?.mount || ''}`, disk, value ? `${formatBytes(value.used_bytes)} / ${formatBytes(value.total_bytes)}` : null)
+  }
+  const docker = snapshot.docker.value
+  addMetric('Docker', snapshot.docker, docker ? `Images ${docker.images} · Containers ${docker.containers} · Volumes ${docker.volumes}` : null)
+  for (const container of snapshot.containers) {
+    addMetric(`${container.project} / ${container.service}`, container, container.state)
+  }
+  if (snapshot.containers_message) addMetric('Containers', { status: snapshot.containers_status }, snapshot.containers_message)
 }
 
 const externalLink = (label, value, className = '') => {
@@ -196,6 +259,7 @@ const updateSummary = (payload) => {
 }
 
 const render = (payload) => {
+  renderHost(payload.host)
   const projects = Array.isArray(payload.projects) ? payload.projects : []
   updateSummary({ ...payload, projects })
 
@@ -216,6 +280,7 @@ const render = (payload) => {
 }
 
 const renderError = (error) => {
+  renderHost(null)
   totalCountEl.textContent = '—'
   operationalCountEl.textContent = '—'
   downCountEl.textContent = '—'

@@ -8,8 +8,10 @@ For every project, Yard Web reads:
 - the project name from the TOML filename;
 - `deployment.health_url` for the HTTP health check;
 - `/var/lib/yard/<project>.json` for the currently deployed release.
+- `/var/lib/yard/host.json` for host metrics and their precomputed statuses.
 
 Projects without `deployment.health_url` still appear, but their health is reported as `Unknown`.
+The CLI (`yard status <project>` or `yard host`) collects CPU, load, RAM, physical disks, Docker usage and Yard container states on the host and writes an atomic, versioned snapshot. Web only reads this file through its existing read-only state mount: it has no Docker socket, host disk mounts, or host-monitoring permissions. Schedule `yard host` externally if continuous refresh is wanted; Yard installs no timer.
 
 ## Install
 
@@ -80,6 +82,8 @@ GET /api/status
 - request latency;
 - current Yard release tag/revision and deployment timestamp.
 
+The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (version 1) with the host metrics, applied thresholds, and statuses computed by the CLI. Web does not recompute warnings. The host view becomes `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300 seconds; stale age is still shown. Override with `YARD_WEB_HOST_MAX_AGE_SECONDS`. The rest of `/api/status` continues to work. Project name `host` is reserved for the snapshot filename.
+
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
 
 ## Update
@@ -105,7 +109,8 @@ Basic Auth is enforced by Caddy, not by the application container.
 - drops Linux capabilities;
 - enables `no-new-privileges`;
 - has conservative process, memory, and CPU limits;
-- never reads application `.env` files or secrets.
+- never reads application `.env` files or secrets;
+- reads only known public fields from the host snapshot (no arbitrary JSON forwarding).
 
 Only `deployment.health_url` and Yard's deployment metadata are exposed to the web UI.
 

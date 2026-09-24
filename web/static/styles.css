@@ -240,6 +240,34 @@ a:focus-visible {
   color: #c4cbd4;
 }
 
+.host-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 38px;
+}
+
+.host-metric {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.host-metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.host-metric p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
 .projects {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

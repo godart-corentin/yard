@@ -21,6 +21,7 @@ struct Config {
     static_dir: PathBuf,
     check_timeout: Duration,
     cache_duration: Duration,
+    host_max_age_seconds: u64,
 }
 
 impl Config {
@@ -36,6 +37,7 @@ impl Config {
                 4.0,
             )?),
             cache_duration: Duration::from_secs_f64(env_number("YARD_WEB_CACHE_SECONDS", 15.0)?),
+            host_max_age_seconds: env_number("YARD_WEB_HOST_MAX_AGE_SECONDS", 300)?,
         })
     }
 }
@@ -94,6 +96,108 @@ struct StatusPayload {
     status: String,
     checked_at: String,
     projects: Vec<ProjectStatus>,
+    host: HostStatus,
+}
+
+// Deserialize only the public, versioned snapshot fields. Never proxy arbitrary JSON from disk.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostMetric<T> {
+    value: Option<T>,
+    status: HostLevel,
+    message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HostLevel {
+    Normal,
+    Warning,
+    Critical,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostThresholds {
+    disk_warn_percent: u8,
+    disk_crit_percent: u8,
+    mem_pressure_percent: u8,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostMemory {
+    used_bytes: u64,
+    total_bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostDisk {
+    mount: String,
+    used_bytes: u64,
+    total_bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostDocker {
+    images: String,
+    containers: String,
+    volumes: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostContainer {
+    project: String,
+    service: String,
+    state: String,
+    status: HostLevel,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HostSnapshot {
+    version: u8,
+    collected_at_unix: u64,
+    thresholds: HostThresholds,
+    cpu: HostMetric<f64>,
+    load: HostMetric<[f64; 3]>,
+    memory: HostMetric<HostMemory>,
+    disks: Vec<HostMetric<HostDisk>>,
+    docker: HostMetric<HostDocker>,
+    containers: Vec<HostContainer>,
+    containers_status: HostLevel,
+    containers_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostStatus {
+    status: &'static str,
+    age_seconds: Option<u64>,
+    snapshot: Option<HostSnapshot>,
+    message: &'static str,
+}
+
+fn load_host(state_dir: &Path, now: u64, max_age: u64) -> HostStatus {
+    let unavailable = |age_seconds, message| HostStatus {
+        status: "unknown",
+        age_seconds,
+        snapshot: None,
+        message,
+    };
+    let Ok(contents) = fs::read_to_string(state_dir.join("host.json")) else {
+        return unavailable(None, "Host snapshot unavailable");
+    };
+    let Ok(snapshot) = serde_json::from_str::<HostSnapshot>(&contents) else {
+        return unavailable(None, "Host snapshot invalid");
+    };
+    if snapshot.version != 1 {
+        return unavailable(None, "Host snapshot version unknown");
+    }
+    let Some(age) = now.checked_sub(snapshot.collected_at_unix) else {
+        return unavailable(None, "Host snapshot timestamp invalid");
+    };
+    if age > max_age {
+        return unavailable(Some(age), "Host snapshot stale");
+    }
+    HostStatus {
+        status: "available",
+        age_seconds: Some(age),
+        snapshot: Some(snapshot),
+        message: "",
+    }
 }
 
 struct Cache {
@@ -125,7 +229,8 @@ impl App {
     }
 
     fn status(&self) -> StatusPayload {
-        if let Some(value) = self.cached_status() {
+        if let Some(mut value) = self.cached_status() {
+            value.host = self.host_status();
             return value;
         }
 
@@ -135,6 +240,7 @@ impl App {
             status: overall_status(&checked).to_owned(),
             checked_at: utc_now(),
             projects: checked,
+            host: self.host_status(),
         };
 
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
@@ -150,6 +256,17 @@ impl App {
         } else {
             None
         }
+    }
+
+    fn host_status(&self) -> HostStatus {
+        load_host(
+            &self.config.state_dir,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            self.config.host_max_age_seconds,
+        )
     }
 }
 
@@ -168,6 +285,9 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
         .into_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_owned();
+            if name == "host" {
+                return None;
+            }
             let release = load_release(state_dir, &name);
             let parsed = fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
@@ -198,6 +318,10 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
 }
 
 fn load_release(state_dir: &Path, project: &str) -> Option<Value> {
+    // host.json is reserved for the CLI's host snapshot, never project state.
+    if project == "host" {
+        return None;
+    }
     let contents = fs::read_to_string(state_dir.join(format!("{project}.json"))).ok()?;
     let state: Value = serde_json::from_str(&contents).ok()?;
     state
@@ -702,5 +826,78 @@ mod tests {
             overall_status(&[project("operational"), project("down")]),
             "degraded"
         );
+    }
+
+    #[test]
+    fn missing_malformed_and_unknown_host_snapshots_are_unavailable() {
+        let dir = temp_dir("host-invalid");
+        assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
+        fs::write(dir.join("host.json"), "{").unwrap();
+        assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
+        fs::write(dir.join("host.json"), r#"{"version":99}"#).unwrap();
+        assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn host_snapshot_cannot_be_loaded_as_a_project_release() {
+        let dir = temp_dir("host-reserved");
+        fs::write(dir.join("host.json"), r#"{"current":{"tag":"wrong"}}"#).unwrap();
+        assert!(load_release(&dir, "host").is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_host_manifest_is_not_a_project() {
+        let dir = temp_dir("host-manifest");
+        fs::write(dir.join("host.toml"), "[deployment]\n").unwrap();
+        assert!(load_projects(&dir, &dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cached_project_health_does_not_cache_host_snapshot() {
+        let dir = temp_dir("host-cache");
+        let config = Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects_dir: dir.clone(),
+            state_dir: dir.clone(),
+            static_dir: dir.clone(),
+            check_timeout: Duration::from_secs(1),
+            cache_duration: Duration::from_secs(60),
+            host_max_age_seconds: 300,
+        };
+        let app = App::new(config).unwrap();
+        assert_eq!(app.status().host.status, "unknown");
+        let mut snapshot: serde_json::Value = serde_json::from_str(r#"{"version":1,"collected_at_unix":1000,"thresholds":{"disk_warn_percent":80,"disk_crit_percent":90,"mem_pressure_percent":85},"cpu":{"value":40.0,"status":"normal","message":null},"load":{"value":[1,2,3],"status":"normal","message":null},"memory":{"value":{"used_bytes":50,"total_bytes":100},"status":"warning","message":null},"disks":[],"docker":{"value":null,"status":"unknown","message":"Docker unavailable"},"containers":[],"containers_status":"unknown","containers_message":null}"#).unwrap();
+        snapshot["collected_at_unix"] = serde_json::json!(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+        fs::write(
+            dir.join("host.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(app.status().host.status, "available");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn host_snapshot_is_fresh_then_stale_and_does_not_expose_extra_fields() {
+        let dir = temp_dir("host-fresh");
+        fs::write(dir.join("host.json"), r#"{"version":1,"collected_at_unix":1000,"thresholds":{"disk_warn_percent":80,"disk_crit_percent":90,"mem_pressure_percent":85},"cpu":{"value":40.0,"status":"normal","message":null},"load":{"value":[1,2,3],"status":"normal","message":null},"memory":{"value":{"used_bytes":50,"total_bytes":100},"status":"warning","message":null},"disks":[],"docker":{"value":null,"status":"unknown","message":"Docker unavailable"},"containers":[],"containers_status":"unknown","containers_message":null,"secret":"DO_NOT_EXPOSE"}"#).unwrap();
+        let fresh = load_host(&dir, 1300, 300);
+        assert_eq!(fresh.status, "available");
+        assert_eq!(fresh.age_seconds, Some(300));
+        let payload = serde_json::to_string(&fresh).unwrap();
+        assert!(payload.contains("warning"));
+        assert!(!payload.contains("DO_NOT_EXPOSE"));
+        let stale = load_host(&dir, 1301, 300);
+        assert_eq!(stale.status, "unknown");
+        assert_eq!(stale.age_seconds, Some(301));
+        assert!(stale.snapshot.is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

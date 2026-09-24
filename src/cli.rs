@@ -25,6 +25,9 @@ pub enum Command {
     /// Show Git, Yard and Compose state for a project.
     Status { project: String },
 
+    /// Collect and display host metrics; refresh the Web snapshot.
+    Host,
+
     /// Deploy the configured branch for a project.
     Deploy { project: String },
 
