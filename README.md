@@ -173,6 +173,11 @@ yard status hello-api
 # Inspect only the host and refresh the Web snapshot
 yard host
 
+# List protected and reclaimable images; preview, then explicitly confirm removal
+yard images
+yard images --prune
+yard images --prune --yes
+
 # Deploy the configured branch
 yard deploy hello-api
 
@@ -191,6 +196,8 @@ yard logs hello-api --tail 50 --no-follow
 # Run the configured backup command
 yard backup hello-api
 ```
+
+Image cleanup is CLI-only and never scheduled. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
 
 For development and tests, the system directories can be overridden:
 

@@ -28,6 +28,16 @@ pub enum Command {
     /// Collect and display host metrics; refresh the Web snapshot.
     Host,
 
+    /// Inventory Yard images, optionally pruning unused revisions.
+    Images {
+        /// Simulate removal of candidates (requires --yes to actually remove).
+        #[arg(long)]
+        prune: bool,
+        /// Confirm the requested prune operation.
+        #[arg(long, requires = "prune")]
+        yes: bool,
+    },
+
     /// Deploy the configured branch for a project.
     Deploy { project: String },
 
