@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -99,6 +100,7 @@ impl Fixture {
         fs::create_dir_all(self.root.join("bin")).unwrap();
         let docker = self.root.join("bin/docker");
         fs::write(&docker, r#"#!/bin/sh
+test -r "$FAKE_ROOT/.env" || exit 13
 printf '%s | %s\n' "$*" "$IMAGE_TAG" >> "$FAKE_ROOT/docker.log"
 case " $* " in
   *" config --format json "*) printf '{"services":{"api":{"image":"demo-api:%s"},"worker":{"image":"demo-worker:%s"}}}\n' "$IMAGE_TAG" "$IMAGE_TAG" ;;
@@ -230,6 +232,7 @@ fn deploys_legacy_single_service() {
         "IMAGE_TAG=old\nAPP_SECRET=synthetic-marker\n",
     )
     .unwrap();
+    fs::set_permissions(fixture.root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
     let result = fixture.run("deploy");
     assert!(
         result.status.success(),
@@ -245,6 +248,41 @@ fn deploys_legacy_single_service() {
         .contains("synthetic-marker"));
     assert!(!String::from_utf8_lossy(&result.stdout).contains("synthetic-marker"));
     assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic-marker"));
+}
+
+#[test]
+fn deploy_rejects_preexisting_env_temp_symlink_without_touching_victim() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let victim = fixture.root.join("victim");
+    fs::write(&victim, "victim-intact\n").unwrap();
+    let legacy = fixture.root.join("..env.yard.tmp");
+    symlink(&victim, &legacy).unwrap();
+
+    let result = fixture.run("deploy");
+    assert!(
+        !result.status.success(),
+        "deploy must reject a planted temp symlink"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("temporary"));
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "victim-intact\n");
+    assert_eq!(
+        fs::read_to_string(fixture.root.join(".env")).unwrap(),
+        "IMAGE_TAG=old\n"
+    );
+    assert!(fs::symlink_metadata(&legacy)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_dir(&fixture.root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
+        1
+    );
 }
 
 #[test]

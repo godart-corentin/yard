@@ -1,6 +1,8 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 
+use crate::atomic_file;
 use crate::error::{Result, YardError};
 
 pub fn get(path: &Path, key: &str) -> Result<Option<String>> {
@@ -22,7 +24,12 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>> {
 }
 
 pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
-    let metadata = fs::metadata(path)?;
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(YardError::Config(format!(
+            "refusing symbolic link at {}",
+            path.display()
+        )));
+    }
     let contents = fs::read_to_string(path)?;
     let prefix = format!("{key}=");
     let matches = contents
@@ -59,22 +66,33 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| YardError::Config(format!("invalid env file path: {}", path.display())))?;
-    let tmp = parent.join(format!(
+    // Reject a planted legacy temporary path, rather than silently proceeding with
+    // the old exploit still present. Never remove a file we did not create.
+    let legacy_tmp = parent.join(format!(
         ".{}.yard.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("env")
     ));
 
-    fs::write(&tmp, output)?;
-    fs::set_permissions(&tmp, metadata.permissions())?;
-    fs::rename(tmp, path)?;
-    Ok(())
+    match fs::symlink_metadata(&legacy_tmp) {
+        Ok(_) => {
+            return Err(YardError::Config(format!(
+                "refusing pre-existing temporary file at {}",
+                legacy_tmp.display()
+            )))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    atomic_file::write(path, output.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{get, set};
@@ -84,7 +102,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("yard-env-{}-{nonce}", std::process::id()))
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/envfile-tests");
+        fs::create_dir_all(&root).unwrap();
+        root.join(format!("yard-env-{}-{nonce}", std::process::id()))
     }
 
     #[test]
@@ -114,5 +134,61 @@ mod tests {
             Some("abc123")
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn planted_regular_temp_is_rejected_and_preserved() {
+        let path = temp_file();
+        fs::write(&path, "APP_IMAGE_TAG=old\n").unwrap();
+        let legacy = path.with_file_name(format!(
+            ".{}.yard.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::write(&legacy, "planted\n").unwrap();
+        assert!(set(&path, "APP_IMAGE_TAG", "new")
+            .unwrap_err()
+            .to_string()
+            .contains("temporary"));
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "planted\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "APP_IMAGE_TAG=old\n");
+        fs::remove_file(legacy).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn target_symlink_is_rejected_without_touching_victim() {
+        let path = temp_file();
+        let victim = path.with_extension("victim");
+        fs::write(&victim, "intact\n").unwrap();
+        symlink(&victim, &path).unwrap();
+        assert!(set(&path, "APP_IMAGE_TAG", "new")
+            .unwrap_err()
+            .to_string()
+            .contains("symbolic link"));
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "intact\n");
+        fs::remove_file(path).unwrap();
+        fs::remove_file(victim).unwrap();
+    }
+
+    #[test]
+    fn existing_mode_is_preserved_and_success_leaves_no_temp() {
+        let path = temp_file();
+        fs::write(&path, "APP_IMAGE_TAG=old\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        set(&path, "APP_IMAGE_TAG", "new").unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "APP_IMAGE_TAG=new\n");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(!fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".{name}."))));
+        fs::remove_file(path).unwrap();
     }
 }

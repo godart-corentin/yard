@@ -301,7 +301,12 @@ The state contains only deployment metadata: Git revisions, service names and im
 Recommended practices:
 
 - keep project manifests free of credentials;
-- keep application `.env` files protected (`0600` where appropriate);
+- keep application `.env` files protected (`0600` where appropriate); Yard preserves
+  the existing file mode when updating a Compose `.env` file, and creates its
+  temporary replacement with mode `0600` (it does not create a missing `.env`).
+  Docker Compose reads `--env-file` as the same Unix user running Yard, so `0600`
+  works for that deployment; if a different user must read it, configure its
+  access explicitly rather than making secrets world-readable;
 - do not publish database ports unless explicitly required;
 - use private Docker networks for internal services;
 - back up persistent data independently from application images;
