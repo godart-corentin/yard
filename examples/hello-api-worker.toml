@@ -1,0 +1,29 @@
+# One Git revision and one image tag for the API and worker.
+# `service = "api"` remains supported for single-service projects; do not set
+# `service` and `services` together.
+repo = "/srv/hello-api"
+branch = "main"
+remote = "origin"
+
+[compose]
+directory = "/srv/hello-api/deploy"
+file = "docker-compose.yml"
+env_file = ".env"
+services = ["api", "worker"]
+
+# Both Compose services must have build sections and distinct image names:
+#   api:    image: hello-api:${HELLO_API_IMAGE_TAG:-local}
+#   worker: image: hello-worker:${HELLO_API_IMAGE_TAG:-local}
+[image]
+name = "hello-api" # Retained for compatibility with existing manifests.
+tag_env = "HELLO_API_IMAGE_TAG"
+
+[deployment]
+migration_service = "migrate"
+health_url = "https://api.example.com/health"
+health_attempts = 30
+health_interval_seconds = 2
+
+# Optional backup of persistent data before deployment/rollback.
+[backup]
+command = ["/usr/local/sbin/hello-api-backup"]

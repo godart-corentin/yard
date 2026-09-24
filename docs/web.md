@@ -78,7 +78,8 @@ GET /api/status
 - health URL;
 - HTTP status when available;
 - request latency;
-- current Yard release tag/revision and deployment timestamp.
+- current Yard release tag/revision, deployment timestamp, and `release.services` (each service name and image reference, useful for checking exactly which image is deployed);
+- `pending_release` when activation is interrupted or a rollback cannot be verified (including its status and per-service images), so the dashboard can warn that the recorded release and Docker state may differ.
 
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
 

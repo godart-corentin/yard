@@ -148,6 +148,8 @@ services:
 
 This is how Yard builds immutable application images tagged with the Git revision, then switches Compose to the selected release.
 
+For a release spanning multiple Compose services, use `services = ["api", "worker"]` instead of `service = "api"` in `[compose]` (see [`examples/hello-api-worker.toml`](examples/hello-api-worker.toml)). The historical `service` key remains supported and is treated as a one-item list; specifying both keys is an error. The list must not be empty and names must be distinct, nonempty Compose service identifiers. Each listed service needs its own `image:` reference incorporating the shared `[image].tag_env` (for example `hello-api:${HELLO_API_IMAGE_TAG:-local}` and `hello-worker:${HELLO_API_IMAGE_TAG:-local}`), plus a `build:` section. Yard resolves the actual image references via `docker compose config`, so `[image].name` remains required for historical manifests but does not force a single image name across services.
+
 Secrets do **not** belong in Yard manifests. Keep them in the application's own protected environment or secret files.
 
 ## Commands
@@ -252,21 +254,21 @@ More detail is available in [`docs/web.md`](docs/web.md).
 
 ## Deployment model
 
-`yard deploy <project>` currently follows this lifecycle:
+`yard deploy <project>` follows this lifecycle:
 
 1. refuse to deploy if tracked local Git changes exist;
 2. switch to the configured branch;
 3. fetch and fast-forward from the configured Git remote;
 4. run the project's backup command when configured;
 5. derive an immutable image tag from the updated Git commit SHA;
-6. build the configured Compose service using that tag;
+6. resolve and build every configured Compose service using that same tag (one Git commit for the whole release);
 7. run the migration service when configured;
 8. persist the new image tag in the project's Compose `.env` file;
-9. start only the application service (`--no-deps`), leaving persistent dependencies untouched;
+9. start each listed application service (`--no-deps`), leaving persistent dependencies untouched;
 10. wait for the configured HTTP health check;
-11. record the current and previous release under `/var/lib/yard`.
+11. once all services are running and the configured HTTP health check passes, atomically record the active release (revision, service/image references, timestamp and status) and the previous release under `/var/lib/yard`.
 
-If activation or the health check fails after the new image has been selected, Yard attempts to restore the previous application image automatically.
+Build or migration failures leave the active release unchanged and report the running containers. If activation or the health check fails, Yard names the failing service (the configured HTTP check is associated with the first service), reports actual Compose containers, and attempts to restore the previous application images for *all* services. It never records a partially activated release as active. A pending release marker is written before changing the Compose tag and cleared only after a verified activation or restoration; `yard status` highlights pending work and image mismatches. After an interrupted/failed restoration, inspect `yard status` and run `yard rollback <project>` to restore the last recorded active release before attempting another deploy.
 
 Database rollback is deliberately separate. Yard never restores a database automatically just because an application image was rolled back.
 
@@ -274,7 +276,7 @@ Yard treats long-lived dependencies such as databases as already-provisioned inf
 
 ## Rollback model
 
-`yard rollback <project>` selects the previous release recorded by Yard, runs the project's backup command, switches the Compose image tag, starts the service and waits for the health check.
+`yard rollback <project>` selects the previous release recorded by Yard (or the last active release when recovering an interrupted activation), runs the project's backup command, switches the Compose image tag, starts every listed service and waits for the existing HTTP health check. All target images must already exist locally.
 
 A specific Git revision can also be supplied:
 
@@ -292,7 +294,7 @@ Deployment state is stored as JSON under:
 /var/lib/yard/<project>.json
 ```
 
-The state contains only deployment metadata such as Git revisions and image tags. Application secrets remain outside Yard.
+The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or rollback uses that release. Writes remain atomic and state files are mode `0600`. Application secrets remain outside Yard.
 
 ## Security
 

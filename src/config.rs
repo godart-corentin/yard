@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{de, Deserialize, Deserializer};
 
 use crate::error::{Result, YardError};
 
@@ -34,12 +34,46 @@ pub struct ProjectConfig {
     pub backup: Option<BackupConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ComposeConfig {
     pub directory: PathBuf,
     pub file: String,
     pub env_file: String,
-    pub service: String,
+    pub services: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ComposeConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            directory: PathBuf,
+            file: String,
+            env_file: String,
+            service: Option<String>,
+            services: Option<Vec<String>>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let services = match (raw.service, raw.services) {
+            (Some(_), Some(_)) => {
+                return Err(de::Error::custom(
+                    "compose.service and compose.services are mutually exclusive",
+                ))
+            }
+            (Some(service), None) => vec![service],
+            (None, Some(services)) => services,
+            (None, None) => {
+                return Err(de::Error::custom(
+                    "compose.service or compose.services is required",
+                ))
+            }
+        };
+        Ok(Self {
+            directory: raw.directory,
+            file: raw.file,
+            env_file: raw.env_file,
+            services,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,10 +130,28 @@ impl ProjectConfig {
         if self.compose.file.trim().is_empty() {
             return Err(YardError::Config("compose.file must not be empty".into()));
         }
-        if self.compose.service.trim().is_empty() {
+        if self.compose.services.is_empty() {
             return Err(YardError::Config(
-                "compose.service must not be empty".into(),
+                "compose.services must not be empty".into(),
             ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for service in &self.compose.services {
+            if service.trim().is_empty() {
+                return Err(YardError::Config(
+                    "compose.services contains an empty name".into(),
+                ));
+            }
+            if !valid_service_name(service) {
+                return Err(YardError::Config(format!(
+                    "compose.services contains invalid service name: {service}"
+                )));
+            }
+            if !seen.insert(service) {
+                return Err(YardError::Config(format!(
+                    "compose.services contains duplicate service: {service}"
+                )));
+            }
         }
         if self.compose.env_file.trim().is_empty() {
             return Err(YardError::Config(
@@ -162,6 +214,12 @@ fn valid_env_name(value: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn valid_service_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 #[cfg(test)]

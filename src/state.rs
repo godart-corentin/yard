@@ -1,4 +1,7 @@
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,6 +14,20 @@ pub struct Release {
     pub revision: String,
     pub tag: String,
     pub deployed_at_unix: u64,
+    #[serde(default)]
+    pub services: Vec<ReleaseService>,
+    #[serde(default = "active_status")]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseService {
+    pub name: String,
+    pub image: String,
+}
+
+fn active_status() -> String {
+    "active".to_owned()
 }
 
 impl Release {
@@ -23,7 +40,14 @@ impl Release {
             revision,
             tag,
             deployed_at_unix,
+            services: Vec::new(),
+            status: active_status(),
         }
+    }
+
+    pub fn with_services(mut self, services: Vec<ReleaseService>) -> Self {
+        self.services = services;
+        self
     }
 }
 
@@ -31,6 +55,8 @@ impl Release {
 pub struct ProjectState {
     pub current: Option<Release>,
     pub previous: Option<Release>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Release>,
 }
 
 impl ProjectState {
@@ -46,9 +72,51 @@ impl ProjectState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(self)?))?;
+        // Never follow a predictable pre-existing temp path in this privileged CLI.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp = path.with_file_name(format!(
+            ".{}.{}.{nonce}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("state"),
+            std::process::id()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(format!("{}\n", serde_json::to_string_pretty(self)?).as_bytes())?;
+        file.sync_all()?;
         fs::rename(tmp, path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn preexisting_temp_file_is_not_followed_and_state_is_private() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/state-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(format!("{}.json", std::process::id()));
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, "stale").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+        ProjectState::default().save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_to_string(&tmp).unwrap(), "stale");
+        fs::remove_file(tmp).unwrap();
+        fs::remove_file(path).unwrap();
     }
 }
