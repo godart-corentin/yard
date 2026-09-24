@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -173,6 +173,7 @@ impl Fixture {
         fs::create_dir_all(self.root.join("bin")).unwrap();
         let docker = self.root.join("bin/docker");
         fs::write(&docker, r#"#!/bin/sh
+test -r "$FAKE_ROOT/.env" || exit 13
 printf '%s | %s\n' "$*" "$IMAGE_TAG" >> "$FAKE_ROOT/docker.log"
 case " $* " in
   *" config --format json "*)
@@ -309,6 +310,7 @@ fn deploys_legacy_single_service() {
         "IMAGE_TAG=old\nAPP_SECRET=synthetic-marker\n",
     )
     .unwrap();
+    fs::set_permissions(fixture.root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
     let result = fixture.run("deploy");
     assert!(
         result.status.success(),
@@ -324,6 +326,135 @@ fn deploys_legacy_single_service() {
         .contains("synthetic-marker"));
     assert!(!String::from_utf8_lossy(&result.stdout).contains("synthetic-marker"));
     assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic-marker"));
+}
+
+#[test]
+fn deploy_rejects_preexisting_env_temp_symlink_without_touching_victim() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let victim = fixture.root.join("victim");
+    fs::write(&victim, "victim-intact\n").unwrap();
+    let legacy = fixture.root.join("..env.yard.tmp");
+    symlink(&victim, &legacy).unwrap();
+
+    let result = fixture.run("deploy");
+    assert!(
+        !result.status.success(),
+        "deploy must reject a planted temp symlink"
+    );
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains(&legacy.display().to_string()), "{error}");
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "victim-intact\n");
+    assert_eq!(
+        fs::read_to_string(fixture.root.join(".env")).unwrap(),
+        "IMAGE_TAG=old\n"
+    );
+    assert!(fs::symlink_metadata(&legacy)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(
+        !fixture.root.join("state/demo.json").exists(),
+        "a refused deployment must not leave a pending release"
+    );
+    assert_eq!(
+        fs::read_dir(&fixture.root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
+        1
+    );
+    fs::remove_file(&legacy).unwrap();
+    let deploy = fixture.run("deploy");
+    assert!(
+        deploy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deploy.stderr)
+    );
+    assert!(fixture.state()["pending"].is_null());
+    let rollback = fixture.run("rollback");
+    assert!(
+        rollback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rollback.stderr)
+    );
+    assert_eq!(fixture.state()["current"]["tag"], "old");
+    assert!(fixture.state()["pending"].is_null());
+    assert!(!fs::read_dir(&fixture.root)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")));
+}
+
+#[test]
+fn interrupted_release_with_planted_temp_can_recover_after_removal() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let mut state = fixture.state();
+    let current = state["current"].clone();
+    state["pending"] = current.clone();
+    state["pending"]["status"] = "activating".into();
+    let state_path = fixture.root.join("state/demo.json");
+    fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
+    let legacy = fixture.root.join("..env.yard.tmp");
+    fs::write(&legacy, "planted\n").unwrap();
+    let refused = fixture.run("rollback");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains(&legacy.display().to_string()));
+    assert_eq!(fixture.state(), state);
+    assert_eq!(fs::read_to_string(&legacy).unwrap(), "planted\n");
+    fs::remove_file(&legacy).unwrap();
+    let recovered = fixture.run("rollback");
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(fixture.state()["current"]["tag"], current["tag"]);
+    assert!(fixture.state()["pending"].is_null());
+    assert!(fixture.run("deploy").status.success());
+}
+
+#[test]
+fn rejected_deploy_and_rollback_preserve_existing_state() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    let state = fixture.state();
+    let legacy = fixture.root.join("..env.yard.tmp");
+    fs::write(&legacy, "planted\n").unwrap();
+    for command in ["deploy", "rollback"] {
+        let refused = fixture.run(command);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains(&legacy.display().to_string()));
+        assert_eq!(fixture.state(), state);
+    }
+    fs::remove_file(legacy).unwrap();
+    assert!(fixture.run("deploy").status.success());
+    assert!(fixture.run("rollback").status.success());
+    assert!(fixture.state()["pending"].is_null());
+}
+
+#[test]
+fn env_symlink_refusal_does_not_create_pending_or_modify_victim() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let env = fixture.root.join(".env");
+    let victim = fixture.root.join("victim");
+    fs::write(&victim, "IMAGE_TAG=old\n").unwrap();
+    fs::remove_file(&env).unwrap();
+    symlink(&victim, &env).unwrap();
+    let refused = fixture.run("deploy");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains(&env.display().to_string()));
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "IMAGE_TAG=old\n");
+    assert!(!fixture.root.join("state/demo.json").exists());
 }
 
 #[test]

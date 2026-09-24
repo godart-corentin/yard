@@ -1,3 +1,4 @@
+mod atomic_file;
 mod cli;
 mod command;
 mod config;

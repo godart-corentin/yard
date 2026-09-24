@@ -1,12 +1,10 @@
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic_file;
 use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,28 +70,10 @@ impl ProjectState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        // Never follow a predictable pre-existing temp path in this privileged CLI.
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp = path.with_file_name(format!(
-            ".{}.{}.{nonce}.tmp",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("state"),
-            std::process::id()
-        ));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(format!("{}\n", serde_json::to_string_pretty(self)?).as_bytes())?;
-        file.sync_all()?;
-        fs::rename(tmp, path)?;
-        Ok(())
+        atomic_file::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(self)?).as_bytes(),
+        )
     }
 }
 
@@ -118,5 +98,20 @@ mod tests {
         assert_eq!(fs::read_to_string(&tmp).unwrap(), "stale");
         fs::remove_file(tmp).unwrap();
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn existing_state_mode_is_preserved() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/state-mode-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("state.json");
+        fs::write(&path, "{}\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        ProjectState::default().save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
