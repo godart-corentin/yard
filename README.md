@@ -294,7 +294,7 @@ Deployment state is stored as JSON under:
 /var/lib/yard/<project>.json
 ```
 
-The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or rollback uses that release. Writes remain atomic and state files are mode `0600`. Application secrets remain outside Yard.
+The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or rollback uses that release. Writes remain atomic; new state files are mode `0600` and updates preserve the existing mode. Application secrets remain outside Yard.
 
 ## Security
 
