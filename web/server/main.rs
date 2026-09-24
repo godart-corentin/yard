@@ -929,4 +929,65 @@ mod tests {
         assert!(stale.snapshot.is_none());
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn status_http_response_preserves_all_host_metrics() {
+        let dir = temp_dir("host-api-metrics");
+        let mut snapshot: Value = serde_json::from_str(VALID_HOST).unwrap();
+        snapshot["collected_at_unix"] = serde_json::json!(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+        snapshot["load"]["value"] = serde_json::json!([1.25, 2.5, 3.75]);
+        snapshot["docker"] = serde_json::json!({
+            "value": {"images": "2GB", "containers": "1MB", "volumes": "3GB"},
+            "status": "normal", "message": null
+        });
+        fs::write(
+            dir.join("host.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+
+        let app = App::new(Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects_dir: dir.clone(),
+            state_dir: dir.clone(),
+            static_dir: dir.clone(),
+            check_timeout: Duration::from_secs(1),
+            cache_duration: Duration::from_secs(1),
+            host_max_age_seconds: 300,
+        })
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &app).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK"), "{headers}");
+        let payload: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["host"]["status"], "available");
+        let exposed = payload["host"]["snapshot"].as_object().unwrap();
+        for key in ["cpu", "load", "memory", "disks", "docker", "containers"] {
+            assert!(
+                exposed.contains_key(key),
+                "missing host snapshot key: {key}"
+            );
+        }
+        assert_eq!(exposed["load"]["value"], snapshot["load"]["value"]);
+        assert_eq!(exposed["docker"]["value"], snapshot["docker"]["value"]);
+        assert!(!exposed.contains_key("secret"));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

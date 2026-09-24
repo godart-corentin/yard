@@ -42,6 +42,11 @@ fn host_command_collects_with_fake_docker_and_never_runs_mutating_commands() {
     );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("HOST\n"));
+    assert!(text
+        .lines()
+        .any(|line| line.starts_with("  Load ") && line.contains(" / ")));
+    assert!(text.lines().any(|line| line.starts_with("  Docker ")
+        && line.contains("images 2GB, containers 1MB, volumes 3GB")));
     assert!(text.contains("images 2GB, containers 1MB, volumes 3GB"));
     assert!(text.contains("hello / api: exited [Critical]"));
     let snapshot: serde_json::Value =
