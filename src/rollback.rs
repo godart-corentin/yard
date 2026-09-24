@@ -1,7 +1,7 @@
 use tracing::warn;
 
 use crate::error::{Result, YardError};
-use crate::health;
+
 use crate::project::Project;
 use crate::state::{ProjectState, Release};
 
@@ -9,22 +9,43 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     project.ensure_clean()?;
 
     let mut state = ProjectState::load(&project.state_path)?;
-    let current = current_release(project, &state)?;
+    project.check_tag_writable()?;
+    let recovering = state.pending.is_some() && revision.is_none();
+    let recovering_first = recovering && state.current.is_none();
+    let mut current = if recovering_first {
+        state
+            .previous
+            .clone()
+            .ok_or_else(|| YardError::NoPreviousRelease(project.name.clone()))?
+    } else {
+        current_release(project, &state)?
+    };
+    if current.services.is_empty() {
+        current.services = project.release_services(&current.tag)?;
+    }
 
-    let target = match revision {
+    let mut target = match revision {
         Some(revision) => {
             let resolved = project.resolve_revision(revision)?;
             Release::new(resolved.clone(), Project::tag_for_revision(&resolved))
         }
-        None => state
-            .previous
-            .clone()
-            .ok_or_else(|| YardError::NoPreviousRelease(project.name.clone()))?,
+        None => (if recovering {
+            state.current.clone().or_else(|| state.previous.clone())
+        } else {
+            state.previous.clone()
+        })
+        .ok_or_else(|| YardError::NoPreviousRelease(project.name.clone()))?,
     };
 
-    let image_ref = project.image_ref(&target.tag);
-    if !project.image_exists(&target.tag)? {
-        return Err(YardError::ImageMissing(image_ref));
+    if target.services.is_empty() {
+        target.services = project.release_services(&target.tag)?;
+    }
+    target.status = "active".to_owned();
+
+    for service in &target.services {
+        if !project.image_ref_exists(&service.image)? {
+            return Err(YardError::ImageMissing(service.image.clone()));
+        }
     }
 
     println!("Rolling back {}", project.name);
@@ -43,32 +64,49 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     project.run_backup()?;
     println!("✓ Backup");
 
+    let mut pending = target.clone();
+    pending.status = "activating".to_owned();
+    project.check_tag_writable()?;
+    state.pending = Some(pending);
+    state.save(&project.state_path)?;
     project.persist_tag(&target.tag)?;
-
-    let activation = (|| -> Result<()> {
-        project.compose_up(&target.tag)?;
-        println!("✓ Activate");
-        health::wait(&project.config.deployment)?;
-        println!("✓ Health check");
-        Ok(())
-    })();
+    let activation = project.activate(&target);
 
     if let Err(error) = activation {
         warn!(project = %project.name, %error, "rollback failed; restoring previous application image");
+        eprintln!(
+            "Docker Compose after failure: {}",
+            project
+                .compose_ps()
+                .unwrap_or_else(|error| error.to_string())
+        );
         let restore = (|| -> Result<()> {
             project.persist_tag(&current.tag)?;
-            project.compose_up(&current.tag)?;
-            health::wait(&project.config.deployment)?;
+            project.activate(&current)?;
             Ok(())
         })();
         if let Err(restore_error) = restore {
             warn!(project = %project.name, %restore_error, "failed to restore the original release");
+        } else {
+            state.pending = None;
+            if recovering_first {
+                current.status = "active".to_owned();
+                state.current = Some(current);
+                state.previous = None;
+            }
+            state.save(&project.state_path)?;
         }
         return Err(error);
     }
 
-    state.previous = Some(current);
+    if !recovering {
+        current.status = "superseded".to_owned();
+        state.previous = Some(current);
+    } else if recovering_first {
+        state.previous = None;
+    }
     state.current = Some(target.clone());
+    state.pending = None;
     state.save(&project.state_path)?;
 
     println!();

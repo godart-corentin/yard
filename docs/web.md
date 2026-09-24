@@ -80,7 +80,8 @@ GET /api/status
 - health URL;
 - HTTP status when available;
 - request latency;
-- current Yard release tag/revision and deployment timestamp.
+- current Yard release tag/revision, deployment timestamp, and `release.services` (each service name and image reference, useful for checking exactly which image is deployed);
+- `pending_release` when activation is interrupted or a rollback cannot be verified (including its status and per-service images), so the dashboard can warn that the recorded release and Docker state may differ.
 
 The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (version 1) with the host metrics, applied thresholds, and statuses computed by the CLI. Web does not recompute warnings. A configured project with no Compose containers yet has `containers_status: "unknown"` and the message "No containers for a configured project"; only a stopped container is `Critical`. The host view becomes `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300 seconds; stale age is still shown. Override with `YARD_WEB_HOST_MAX_AGE_SECONDS`. The rest of `/api/status` continues to work. Project name `host` is reserved for the snapshot filename.
 

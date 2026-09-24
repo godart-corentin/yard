@@ -249,6 +249,20 @@ const renderProject = (project, containers) => {
     }
     card.append(group)
   }
+  if (Array.isArray(release.services)) {
+    const images = document.createElement('div')
+    images.className = 'service-facts'
+    for (const service of release.services) {
+      addFact(images, service.name, service.image || '—')
+    }
+    card.append(images)
+  }
+  if (project.pending_release) {
+    const pending = document.createElement('p')
+    pending.className = 'service-error'
+    pending.textContent = `Release ${project.pending_release.tag || '—'} ${project.pending_release.status || 'activating'} — Docker state may differ; run yard status and yard rollback.`
+    card.append(pending)
+  }
 
   if (project.error) {
     const error = document.createElement('p')

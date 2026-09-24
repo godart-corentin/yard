@@ -43,7 +43,27 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
     println!("Release");
     print_release("current", state.current.as_ref());
     print_release("previous", state.previous.as_ref());
+    print_release("pending", state.pending.as_ref());
     println!("  {:<9} {}", "env", env_tag.as_deref().unwrap_or("not set"));
+    if let Some(pending) = &state.pending {
+        println!(
+            "  WARNING: {} release not yet active; rollback to recover",
+            pending.status
+        );
+    }
+    if let Some(current) = &state.current {
+        if !current.services.is_empty() {
+            let (matched, details) = project.runtime_report(current)?;
+            println!(
+                "  Docker: {} — {details}",
+                if matched && state.pending.is_none() {
+                    "matched"
+                } else {
+                    "MISMATCH"
+                }
+            );
+        }
+    }
 
     println!();
     println!("Backup");
@@ -111,12 +131,18 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
 
 fn print_release(label: &str, release: Option<&Release>) {
     match release {
-        Some(release) => println!(
-            "  {:<9} {}  {}",
-            label,
-            Project::tag_for_revision(&release.revision),
-            release.tag
-        ),
+        Some(release) => {
+            println!(
+                "  {:<9} {}  {} ({})",
+                label,
+                Project::tag_for_revision(&release.revision),
+                release.tag,
+                release.status
+            );
+            for service in &release.services {
+                println!("    {}  {}", service.name, service.image);
+            }
+        }
         None => println!("  {label:<9} none"),
     }
 }

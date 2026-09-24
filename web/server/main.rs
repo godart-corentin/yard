@@ -74,6 +74,7 @@ struct Project {
     name: String,
     health_url: Option<String>,
     release: Option<Value>,
+    pending_release: Option<Value>,
     config_error: Option<String>,
 }
 
@@ -82,6 +83,7 @@ struct ProjectStatus {
     name: String,
     health_url: Option<String>,
     release: Option<Value>,
+    pending_release: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
     checked_at: String,
@@ -288,7 +290,7 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             if name == "host" {
                 return None;
             }
-            let release = load_release(state_dir, &name);
+            let (release, pending_release) = load_releases(state_dir, &name);
             let parsed = fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|contents| {
@@ -304,12 +306,14 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                         .map(|url| url.trim().to_owned())
                         .filter(|url| !url.is_empty()),
                     release,
+                    pending_release,
                     config_error: None,
                 },
                 Err(error) => Project {
                     name,
                     health_url: None,
                     release,
+                    pending_release,
                     config_error: Some(error),
                 },
             })
@@ -317,17 +321,22 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
         .collect()
 }
 
-fn load_release(state_dir: &Path, project: &str) -> Option<Value> {
+fn load_releases(state_dir: &Path, project: &str) -> (Option<Value>, Option<Value>) {
     // host.json is reserved for the CLI's host snapshot, never project state.
     if project == "host" {
-        return None;
+        return (None, None);
     }
-    let contents = fs::read_to_string(state_dir.join(format!("{project}.json"))).ok()?;
-    let state: Value = serde_json::from_str(&contents).ok()?;
-    state
-        .get("current")
-        .filter(|value| value.is_object())
-        .cloned()
+    let state = fs::read_to_string(state_dir.join(format!("{project}.json")))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok());
+    let field = |name| {
+        state
+            .as_ref()
+            .and_then(|state| state.get(name))
+            .filter(|value| value.is_object())
+            .cloned()
+    };
+    (field("current"), field("pending"))
 }
 
 fn check_projects(projects: Vec<Project>, client: &Client) -> Vec<ProjectStatus> {
@@ -369,6 +378,7 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
         name: project.name,
         health_url: project.health_url,
         release: project.release,
+        pending_release: project.pending_release,
         config_error: project.config_error.clone(),
         checked_at: utc_now(),
         latency_ms: None,
@@ -702,6 +712,7 @@ mod tests {
             name: "test".to_owned(),
             health_url: None,
             release: None,
+            pending_release: None,
             config_error: None,
             checked_at: "2026-01-01T00:00:00Z".to_owned(),
             latency_ms: None,
@@ -758,6 +769,26 @@ mod tests {
     }
 
     #[test]
+    fn exposes_pending_release_alongside_active_release() {
+        let root = temp_dir("pending");
+        let projects = root.join("projects");
+        let state = root.join("state");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(projects.join("demo.toml"), "[deployment]\n").unwrap();
+        fs::write(state.join("demo.json"), r#"{"current":{"tag":"old"},"pending":{"tag":"new","status":"activating","services":[{"name":"api","image":"api:new"}]}}"#).unwrap();
+        let project = load_projects(&projects, &state).remove(0);
+        let checked = check_project(project, &Client::new());
+        let payload = serde_json::to_value(checked).unwrap();
+        assert_eq!(payload["release"]["tag"], "old");
+        assert_eq!(
+            payload["pending_release"]["services"][0]["image"],
+            "api:new"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn project_without_health_url_is_unknown() {
         let client = Client::builder().build().unwrap();
         let checked = check_project(
@@ -765,6 +796,7 @@ mod tests {
                 name: "hello".to_owned(),
                 health_url: None,
                 release: None,
+                pending_release: None,
                 config_error: None,
             },
             &client,
@@ -781,6 +813,7 @@ mod tests {
                 name: "broken".to_owned(),
                 health_url: None,
                 release: None,
+                pending_release: None,
                 config_error: Some("invalid TOML".to_owned()),
             },
             &client,
@@ -812,6 +845,7 @@ mod tests {
                 name: "hello".to_owned(),
                 health_url: Some(format!("http://{address}/health")),
                 release: None,
+                pending_release: None,
                 config_error: None,
             },
             &client,
@@ -871,8 +905,12 @@ mod tests {
     #[test]
     fn host_snapshot_cannot_be_loaded_as_a_project_release() {
         let dir = temp_dir("host-reserved");
-        fs::write(dir.join("host.json"), r#"{"current":{"tag":"wrong"}}"#).unwrap();
-        assert!(load_release(&dir, "host").is_none());
+        fs::write(
+            dir.join("host.json"),
+            r#"{"current":{"tag":"wrong"},"pending":{"tag":"also-wrong"}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_releases(&dir, "host"), (None, None));
         fs::remove_dir_all(dir).unwrap();
     }
 

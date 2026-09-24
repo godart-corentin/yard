@@ -6,6 +6,7 @@ use crate::command;
 use crate::config::ProjectConfig;
 use crate::envfile;
 use crate::error::{Result, YardError};
+use crate::state::{Release, ReleaseService};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -97,21 +98,50 @@ impl Project {
         revision.chars().take(12).collect()
     }
 
-    pub fn image_ref(&self, tag: &str) -> String {
-        format!("{}:{tag}", self.config.image.name)
-    }
-
-    pub fn image_exists(&self, tag: &str) -> Result<bool> {
-        let args = vec![
-            "image".to_owned(),
-            "inspect".to_owned(),
-            self.image_ref(tag),
-        ];
+    pub fn image_ref_exists(&self, image: &str) -> Result<bool> {
+        let args = vec!["image".to_owned(), "inspect".to_owned(), image.to_owned()];
         match command::checked("docker", &args, None, &[]) {
             Ok(_) => Ok(true),
             Err(YardError::CommandFailed { .. }) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    pub fn release_services(&self, tag: &str) -> Result<Vec<ReleaseService>> {
+        let mut args = self.compose_args();
+        args.extend([
+            "config".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ]);
+        let output = command::checked(
+            "docker",
+            &args,
+            Some(&self.config.compose.directory),
+            &self.tag_env(tag),
+        )?;
+        let config: serde_json::Value = serde_json::from_str(&output)?;
+        self.config
+            .compose
+            .services
+            .iter()
+            .map(|name| {
+                let image = config["services"][name]["image"].as_str().ok_or_else(|| {
+                    YardError::Config(format!(
+                        "Compose service {name} requires an image reference"
+                    ))
+                })?;
+                if !image.ends_with(&format!(":{tag}")) {
+                    return Err(YardError::Config(format!(
+                        "Compose service {name} image {image} must be tagged with {tag}"
+                    )));
+                }
+                Ok(ReleaseService {
+                    name: name.clone(),
+                    image: image.to_owned(),
+                })
+            })
+            .collect()
     }
 
     pub fn current_tag_from_env(&self) -> Result<Option<String>> {
@@ -124,9 +154,14 @@ impl Project {
         envfile::set(&path, &self.config.image.tag_env, tag)
     }
 
-    pub fn compose_build(&self, tag: &str) -> Result<()> {
+    pub fn check_tag_writable(&self) -> Result<()> {
+        envfile::check_writable(&self.config.compose_env_path())
+    }
+
+    pub fn compose_build(&self, tag: &str, service: &str) -> Result<()> {
         let mut args = self.compose_args();
-        args.extend(["build".to_owned(), self.config.compose.service.clone()]);
+        args.push("build".to_owned());
+        args.push(service.to_owned());
         command::checked(
             "docker",
             &args,
@@ -151,15 +186,15 @@ impl Project {
         Ok(())
     }
 
-    pub fn compose_up(&self, tag: &str) -> Result<()> {
+    pub fn compose_up(&self, tag: &str, service: &str) -> Result<()> {
         let mut args = self.compose_args();
         args.extend([
             "up".to_owned(),
             "-d".to_owned(),
             "--no-build".to_owned(),
             "--no-deps".to_owned(),
-            self.config.compose.service.clone(),
         ]);
+        args.push(service.to_owned());
         command::checked(
             "docker",
             &args,
@@ -180,13 +215,69 @@ impl Project {
         command::checked("docker", &args, Some(&self.config.compose.directory), &[])
     }
 
+    pub fn runtime_report(&self, release: &Release) -> Result<(bool, String)> {
+        let output = self.compose_ps()?;
+        let containers: Vec<serde_json::Value> = if output.trim().is_empty() {
+            Vec::new()
+        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(&output) {
+            array
+        } else {
+            output
+                .lines()
+                .map(serde_json::from_str)
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let mut matched = true;
+        let mut details = Vec::new();
+        for service in &release.services {
+            let observed = containers
+                .iter()
+                .find(|item| item["Service"] == service.name);
+            let actual = observed.map_or("missing", |item| {
+                item["Image"].as_str().unwrap_or("unknown")
+            });
+            let state = observed.map_or("missing", |item| {
+                item["State"].as_str().unwrap_or("unknown")
+            });
+            if actual != service.image || state != "running" {
+                matched = false;
+            }
+            details.push(format!(
+                "{}: {} ({state}, expected {})",
+                service.name, actual, service.image
+            ));
+        }
+        Ok((matched, details.join("; ")))
+    }
+
+    pub fn activate(&self, release: &Release) -> Result<()> {
+        for service in &release.services {
+            self.compose_up(&release.tag, &service.name)
+                .map_err(|source| YardError::Service {
+                    service: service.name.clone(),
+                    source: Box::new(source),
+                })?;
+        }
+        crate::health::wait(&self.config.deployment).map_err(|source| YardError::Service {
+            service: self.config.compose.services[0].clone(),
+            source: Box::new(source),
+        })?;
+        let (matched, report) = self.runtime_report(release)?;
+        if !matched {
+            return Err(YardError::Config(format!(
+                "release does not match Docker Compose: {report}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn compose_logs(&self, tail: u32, follow: bool) -> Result<()> {
         let mut args = self.compose_args();
         args.extend(["logs".to_owned(), "--tail".to_owned(), tail.to_string()]);
         if follow {
             args.push("--follow".to_owned());
         }
-        args.push(self.config.compose.service.clone());
+        args.extend(self.config.compose.services.iter().cloned());
         command::inherit("docker", &args, Some(&self.config.compose.directory), &[])
     }
 

@@ -39,4 +39,11 @@ pub enum YardError {
 
     #[error("image is not available locally: {0}")]
     ImageMissing(String),
+
+    #[error("service {service}: {source}")]
+    Service {
+        service: String,
+        #[source]
+        source: Box<YardError>,
+    },
 }
