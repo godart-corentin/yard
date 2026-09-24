@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::command;
 use crate::error::{Result, YardError};
+use crate::monitor::Monitor;
 use crate::project::Project;
 use crate::state::{ProjectState, Release};
 
@@ -129,6 +130,12 @@ pub fn run(projects_dir: &Path, state_dir: &Path, confirmed: bool) -> Result<()>
     let mut inventories = BTreeMap::new();
     let mut blocked = Vec::new();
     for name in Project::list(projects_dir)? {
+        if matches!(
+            Monitor::load(&projects_dir.join(format!("{name}.toml"))),
+            Ok(Some(_))
+        ) {
+            continue;
+        }
         let result = (|| -> Result<Inventory> {
             let project = Project::load(&name, projects_dir, state_dir)?;
             // An absent state does not prove that no release needs its image.

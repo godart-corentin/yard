@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::error::{Result, YardError};
 use crate::host;
+use crate::monitor::Monitor;
 use crate::project::Project;
 use crate::service_health::{Health, ServiceHealth};
 use crate::state::{BackupAttempt, ProjectState, Release};
@@ -23,6 +24,8 @@ struct ComposeService {
     health: String,
     #[serde(rename = "Image", default)]
     image: String,
+    #[serde(rename = "ExitCode", default)]
+    exit_code: Option<i32>,
 }
 
 pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<()> {
@@ -295,6 +298,15 @@ fn load_state(project: &Project) -> Result<ProjectState> {
 }
 
 fn drift(project: &Project, state: &ProjectState, service: &ComposeService) -> Option<String> {
+    if !project
+        .config
+        .compose
+        .services
+        .iter()
+        .any(|name| name == service.display_name())
+    {
+        return None;
+    }
     if !service.state.eq_ignore_ascii_case("running") {
         return None;
     }
@@ -353,6 +365,12 @@ fn drift(project: &Project, state: &ProjectState, service: &ComposeService) -> O
     }
 }
 
+fn expected_finished_migration(project: &Project, service: &ComposeService) -> bool {
+    project.config.deployment.migration_service.as_deref() == Some(service.display_name())
+        && service.state.eq_ignore_ascii_case("exited")
+        && service.exit_code == Some(0)
+}
+
 // Local checkout only: Docker volumes and remote backups have no per-project size
 // in the existing data. Do not follow symlinks outside the checkout.
 fn project_disk(path: &Path) -> std::io::Result<u64> {
@@ -402,6 +420,23 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
         println!("No projects configured");
     }
     for name in names {
+        let path = projects_dir.join(format!("{name}.toml"));
+        match Monitor::load(&path) {
+            Ok(Some(monitor)) => {
+                let (healthy, result) = monitor.check();
+                println!(
+                    "{} {name}: {result}; {}",
+                    if healthy { "OK" } else { "ALERT" },
+                    monitor.url()
+                );
+                continue;
+            }
+            Err(error) => {
+                println!("ALERT {name}: project not inspectable ({error})");
+                continue;
+            }
+            Ok(None) => {}
+        }
         let project = match Project::load(&name, projects_dir, state_dir) {
             Ok(project) => project,
             Err(error) => {
@@ -433,9 +468,10 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
             .collect();
         let problem = services.as_ref().map_or(true, |rows| {
             rows.is_empty()
-                || rows
-                    .iter()
-                    .any(|row| !row.state.eq_ignore_ascii_case("running"))
+                || rows.iter().any(|row| {
+                    !row.state.eq_ignore_ascii_case("running")
+                        && !expected_finished_migration(&project, row)
+                })
                 || project
                     .config
                     .compose

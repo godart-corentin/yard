@@ -8,6 +8,7 @@ mod error;
 mod health;
 mod host;
 mod images;
+mod monitor;
 mod project;
 mod restore;
 mod service_health;
@@ -63,6 +64,16 @@ fn run() -> Result<()> {
         }
         Command::Status { project } => {
             if let Some(name) = project {
+                let path = projects_dir.join(format!("{name}.toml"));
+                if path.is_file() {
+                    if let Some(monitor) = monitor::Monitor::load(&path)? {
+                        let (healthy, result) = monitor.check();
+                        println!("Project: {name}");
+                        println!("Health URL: {}", monitor.url());
+                        println!("Status: {} {result}", if healthy { "OK" } else { "ALERT" });
+                        return Ok(());
+                    }
+                }
                 let project = Project::load(&name, &projects_dir, &state_dir)?;
                 status::run(&project, &projects_dir, &state_dir)?;
             } else {

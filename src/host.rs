@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::command;
+use crate::monitor::Monitor;
 use crate::project::Project;
 use crate::service_health::{self, ServiceHealth};
 
@@ -265,7 +266,11 @@ fn parse_docker_df(text: &str) -> Option<DockerUsage> {
     })
 }
 
-fn parse_containers(project: &str, text: &str) -> Option<Vec<Container>> {
+fn parse_containers(
+    project: &str,
+    migration_service: Option<&str>,
+    text: &str,
+) -> Option<Vec<Container>> {
     let rows: Vec<serde_json::Value> = if text.trim().is_empty() {
         vec![]
     } else if text.trim().starts_with('[') {
@@ -280,7 +285,10 @@ fn parse_containers(project: &str, text: &str) -> Option<Vec<Container>> {
         .map(|row| {
             let service = row.get("Service")?.as_str()?.to_owned();
             let state = row.get("State")?.as_str()?.to_owned();
-            let status = if state.eq_ignore_ascii_case("running") {
+            let completed_migration = migration_service == Some(service.as_str())
+                && state.eq_ignore_ascii_case("exited")
+                && row.get("ExitCode").and_then(serde_json::Value::as_i64) == Some(0);
+            let status = if state.eq_ignore_ascii_case("running") || completed_migration {
                 Level::Normal
             } else {
                 Level::Critical
@@ -386,11 +394,19 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
     match Project::list(projects_dir) {
         Ok(names) => {
             for name in names {
+                let path = projects_dir.join(format!("{name}.toml"));
+                if matches!(Monitor::load(&path), Ok(Some(_))) {
+                    continue;
+                }
                 let project = Project::load(&name, projects_dir, Path::new("/")).ok();
-                let found = project
-                    .as_ref()
-                    .and_then(|p| p.compose_ps().ok())
-                    .and_then(|s| parse_containers(&name, &s));
+                let found = project.as_ref().and_then(|p| {
+                    let output = p.compose_ps().ok()?;
+                    parse_containers(
+                        &name,
+                        p.config.deployment.migration_service.as_deref(),
+                        &output,
+                    )
+                });
                 if let Some(project) = project.as_ref() {
                     services.extend(service_health::collect(
                         project,
@@ -758,10 +774,24 @@ mod tests {
         assert_eq!(usage.images, "2.4GB");
         assert_eq!(usage.volumes, "4GB");
         assert_eq!(
-            parse_containers("hello", "{\"Service\":\"api\",\"State\":\"exited\"}").unwrap()[0]
-                .status,
+            parse_containers("hello", None, "{\"Service\":\"api\",\"State\":\"exited\"}").unwrap()
+                [0]
+            .status,
             Level::Critical
         );
+        for (service, exit_code, expected) in [
+            ("migrate", 0, Level::Normal),
+            ("migrate", 1, Level::Critical),
+            ("api", 0, Level::Critical),
+        ] {
+            let row = format!(
+                "{{\"Service\":\"{service}\",\"State\":\"exited\",\"ExitCode\":{exit_code}}}"
+            );
+            assert_eq!(
+                parse_containers("hello", Some("migrate"), &row).unwrap()[0].status,
+                expected
+            );
+        }
         assert!(parse_docker_df("not JSON").is_none());
     }
 }

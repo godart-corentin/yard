@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -290,6 +292,100 @@ fn invalid_project_manifest_is_reported_without_hiding_other_projects() {
         text.contains("ALERT broken: project not inspectable") && text.contains("demo:"),
         "{text}"
     );
+}
+
+#[test]
+fn url_only_monitor_is_checked_without_git_compose_or_state() {
+    let fixture = Fixture::new();
+    fixture.state(full_state());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let size = stream.read(&mut request).unwrap();
+            if String::from_utf8_lossy(&request[..size]).starts_with("GET /health ") {
+                stream
+                    .write_all(b"HTTP/1.1 302 Found\r\nLocation: /ready\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            }
+        }
+    });
+    fs::write(
+        fixture.root.join("projects/monitor.toml"),
+        format!("[deployment]\nhealth_url = 'http://{address}/health'\n"),
+    )
+    .unwrap();
+    let overview = fixture.run(None);
+    assert!(overview.status.success());
+    let text = String::from_utf8_lossy(&overview.stdout);
+    assert!(text.contains("OK monitor: HTTP 200"), "{text}");
+    assert!(text.contains("demo:"), "{text}");
+    assert!(!text.contains("monitor: project not inspectable"), "{text}");
+
+    let detail = fixture.run(Some("monitor"));
+    assert!(detail.status.success());
+    let text = String::from_utf8_lossy(&detail.stdout);
+    assert!(
+        text.contains("Project: monitor") && text.contains("Status: OK HTTP 200"),
+        "{text}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn incomplete_deployment_manifest_is_not_treated_as_url_monitor() {
+    let fixture = Fixture::new();
+    fixture.state(full_state());
+    fs::write(
+        fixture.root.join("projects/broken.toml"),
+        "branch = 'main'\n[deployment]\nhealth_url = 'https://example.com'\n",
+    )
+    .unwrap();
+    let overview = fixture.run(None);
+    let text = String::from_utf8_lossy(&overview.stdout);
+    assert!(
+        text.contains("ALERT broken: project not inspectable"),
+        "{text}"
+    );
+}
+
+#[test]
+fn data_service_image_and_completed_migration_do_not_raise_false_alerts() {
+    let fixture = Fixture::new();
+    fixture.state(full_state());
+    let manifest = fixture.root.join("projects/demo.toml");
+    let mut config = fs::read_to_string(&manifest).unwrap();
+    config.push_str("[deployment]\nmigration_service = 'migrate'\n");
+    fs::write(manifest, config).unwrap();
+    let docker = fixture.root.join("bin/docker");
+    let compose_rows = "{\"Service\":\"api\",\"State\":\"running\",\"Image\":\"app:current\"}\n{\"Service\":\"postgres\",\"State\":\"running\",\"Image\":\"postgres:17\"}\n{\"Service\":\"migrate\",\"State\":\"exited\",\"ExitCode\":0,\"Image\":\"app:old\"}";
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *'ps --all --format json'*) printf '%s\\n' '{compose_rows}' ;; esac\n"
+        ),
+    )
+    .unwrap();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(overview.contains("OK demo:"), "{overview}");
+    assert!(!overview.contains("DRIFT"), "{overview}");
+
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *'ps --all --format json'*) printf '%s\\n' '{}' ;; esac\n",
+            compose_rows.replace("\"ExitCode\":0", "\"ExitCode\":1")
+        ),
+    )
+    .unwrap();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(overview.contains("ALERT demo:"), "{overview}");
 }
 
 #[test]

@@ -11,6 +11,10 @@ For every project, Yard Web reads:
 - `/var/lib/yard/host.json` for host metrics and their precomputed statuses.
 
 Projects without `deployment.health_url` still appear, but their health is reported as `Unknown`.
+For an external service that Yard does not deploy, a manifest containing only
+`[deployment]` and `health_url` is an URL monitor. `yard status` checks the URL
+and reports its HTTP result without requiring Git, Compose, or a release state.
+Deployment commands still require a full project manifest.
 For per-service health, declare `[service_health.<compose service>]` with either
 `type = "http"`, `url = "https://..."` and `timeout_ms = 2000`, or
 `type = "heartbeat"`, an absolute in-container `path` and `max_age_seconds`.
@@ -21,15 +25,22 @@ the worker needs only `touch` and `stat` in the container. A missing, unreadable
 future-dated or stopped source can never be Healthy. Keep the file on the
 container's ephemeral filesystem, not a persistent volume. No Docker socket or
 worker filesystem is exposed to Web. No broker, agent or new dependency is needed.
-An undeclared service probe is explicitly Unknown.
+An undeclared service probe is explicitly Unknown in the CLI and host snapshot;
+the dashboard hides its unconfigured probe row.
 
 At collection time HTTP latency above `YARD_HTTP_WARN_MS` (default 500) is
 Degraded; above `YARD_HTTP_CRIT_MS` (default 2000), Unhealthy. A heartbeat older
 than its `max_age_seconds` is Degraded; older than that limit times
 `YARD_HEARTBEAT_CRIT_MULTIPLIER` (default 2, minimum 2), Unhealthy. Invalid
 threshold overrides use defaults. HTTP errors, non-2xx responses and stopped
-containers are Unhealthy. Schedule `yard host` often enough for HTTP freshness;
-the Web reader recomputes heartbeat age on every API request from its timestamp.
+containers are Unhealthy. Schedule `yard host` often enough for HTTP freshness
+(for the default five-minute snapshot limit, every two minutes works):
+
+```cron
+*/2 * * * * /usr/local/bin/yard host >/dev/null 2>&1
+```
+
+The Web reader recomputes heartbeat age on every API request from its timestamp.
 Once the host snapshot exceeds `YARD_WEB_HOST_MAX_AGE_SECONDS`, probes become
 Unknown until the CLI collects again. A previously saved version-1 snapshot
 without a `services` field remains readable.
@@ -112,7 +123,7 @@ GET /api/status
 
 The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (version 1) with the host metrics, applied thresholds, and statuses computed by the CLI. Web does not recompute warnings. A configured project with no Compose containers yet has `containers_status: "unknown"` and the message "No containers for a configured project"; only a stopped container is `Critical`. The host view becomes `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300 seconds; stale age is still shown. Override with `YARD_WEB_HOST_MAX_AGE_SECONDS`. The rest of `/api/status` continues to work. Project name `host` is reserved for the snapshot filename.
 
-The dashboard's **Host** section shows only CPU, RAM, physical disks and the measurement age. Its badge reflects the most severe CPU/RAM/disk status (or `Unknown` if the snapshot is unavailable); stopped containers, load and Docker usage do not affect it. The **Services** section lists each container beneath its matching project card, with the Compose service name, state and status. A stopped container degrades its service even when the HTTP check succeeds; a failed HTTP check leaves the service `Down`. The Services badge and summary counts reflect these displayed service states. Without a fresh host snapshot, container states cannot be shown and project badges reflect HTTP health alone. The CLI still displays Load, Docker usage and containers, and `/api/status` still exposes all of them in the snapshot; they are simply not displayed in Host.
+The dashboard's **Host** section shows only CPU, RAM, physical disks and the measurement age. Its badge reflects the most severe CPU/RAM/disk status (or `Unknown` if the snapshot is unavailable); stopped containers, load and Docker usage do not affect it. The **Services** section lists each container beneath its matching project card, with the Compose service name, state and status. A configured migration service that exited with code 0 appears as `Completed` and does not degrade the project. Other stopped containers degrade their service even when the HTTP check succeeds; a failed HTTP check leaves the service `Down`. The Services badge and summary counts reflect these displayed service states. Without a fresh host snapshot, container states cannot be shown and project badges reflect HTTP health alone. The CLI still displays Load, Docker usage and containers, and `/api/status` still exposes all of them in the snapshot; they are simply not displayed in Host.
 
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
 
