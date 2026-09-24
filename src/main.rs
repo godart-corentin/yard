@@ -9,6 +9,7 @@ mod health;
 mod host;
 mod project;
 mod rollback;
+mod service_health;
 mod state;
 mod status;
 

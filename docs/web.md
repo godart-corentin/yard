@@ -11,6 +11,28 @@ For every project, Yard Web reads:
 - `/var/lib/yard/host.json` for host metrics and their precomputed statuses.
 
 Projects without `deployment.health_url` still appear, but their health is reported as `Unknown`.
+For per-service health, declare `[service_health.<compose service>]` with either
+`type = "http"`, `url = "https://..."` and `timeout_ms = 2000`, or
+`type = "heartbeat"`, an absolute in-container `path` and `max_age_seconds`.
+See `examples/hello-api-worker.toml`. A worker periodically touches the file
+inside its own container (for example after a successful processing cycle).
+The CLI reads its mtime using `docker compose exec -T <service> stat -c %Y -- <path>`;
+the worker needs only `touch` and `stat` in the container. A missing, unreadable,
+future-dated or stopped source can never be Healthy. Keep the file on the
+container's ephemeral filesystem, not a persistent volume. No Docker socket or
+worker filesystem is exposed to Web. No broker, agent or new dependency is needed.
+An undeclared service probe is explicitly Unknown.
+
+At collection time HTTP latency above `YARD_HTTP_WARN_MS` (default 500) is
+Degraded; above `YARD_HTTP_CRIT_MS` (default 2000), Unhealthy. A heartbeat older
+than its `max_age_seconds` is Degraded; older than that limit times
+`YARD_HEARTBEAT_CRIT_MULTIPLIER` (default 2, minimum 2), Unhealthy. Invalid
+threshold overrides use defaults. HTTP errors, non-2xx responses and stopped
+containers are Unhealthy. Schedule `yard host` often enough for HTTP freshness;
+the Web reader recomputes heartbeat age on every API request from its timestamp.
+Once the host snapshot exceeds `YARD_WEB_HOST_MAX_AGE_SECONDS`, probes become
+Unknown until the CLI collects again. A previously saved version-1 snapshot
+without a `services` field remains readable.
 The CLI (`yard status <project>` or `yard host`) collects CPU, load, RAM, physical disks, Docker usage and Yard container states on the host and writes an atomic, versioned snapshot. Web only reads this file through its existing read-only state mount: it has no Docker socket, host disk mounts, or host-monitoring permissions. Schedule `yard host` externally if continuous refresh is wanted; Yard installs no timer.
 
 ## Install
@@ -80,6 +102,11 @@ GET /api/status
 - health URL;
 - HTTP status when available;
 - request latency;
+- `services`: sanitized CLI measurements by Compose service (health state,
+  HTTP latency in milliseconds or current heartbeat age in seconds). Project
+  state derives from these service measurements when service probes are
+  configured; the legacy `deployment.health_url` behavior remains for old
+  manifests. Without a fresh snapshot, service measurements are Unknown;
 - current Yard release tag/revision, deployment timestamp, and `release.services` (each service name and image reference, useful for checking exactly which image is deployed);
 - `pending_release` when activation is interrupted or a rollback cannot be verified (including its status and per-service images), so the dashboard can warn that the recorded release and Docker state may differ.
 
@@ -115,7 +142,7 @@ Basic Auth is enforced by Caddy, not by the application container.
 - never reads application `.env` files or secrets;
 - reads only known public fields from the host snapshot (no arbitrary JSON forwarding).
 
-Only `deployment.health_url`, Yard's deployment metadata and the sanitized host snapshot are exposed to the web UI; application environment files are never read.
+Only `deployment.health_url`, Yard's deployment metadata and sanitized service/host snapshot fields are exposed to the web UI; application environment files are never read.
 
 ## Remove
 

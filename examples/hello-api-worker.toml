@@ -24,6 +24,20 @@ health_url = "https://api.example.com/health"
 health_attempts = 30
 health_interval_seconds = 2
 
+# Status probes are independent of deployment.health_url. Omit a probe for
+# explicit Unknown health. The CLI probes these; Web reads the CLI snapshot.
+[service_health.api]
+type = "http"
+url = "https://api.example.com/health"
+timeout_ms = 2000
+
+# The worker must periodically `touch /run/yard/heartbeat` INSIDE its container.
+# Keep this file in the container's ephemeral filesystem, not a persistent volume.
+[service_health.worker]
+type = "heartbeat"
+path = "/run/yard/heartbeat"
+max_age_seconds = 60
+
 # Optional backup of persistent data before deployment/rollback.
 [backup]
 command = ["/usr/local/sbin/hello-api-backup"]

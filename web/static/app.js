@@ -11,6 +11,8 @@ const hostAgeEl = document.querySelector('#host-age')
 
 const labels = {
   operational: 'Operational',
+  healthy: 'Healthy',
+  unhealthy: 'Unhealthy',
   degraded: 'Degraded',
   down: 'Down',
   unknown: 'Unknown'
@@ -46,7 +48,7 @@ const shortRevision = (value) => value ? String(value).slice(0, 12) : '—'
 const statusBadge = (status) => {
   const resolvedStatus = labels[status] ? status : 'unknown'
   const badge = document.createElement('div')
-  badge.className = `badge ${resolvedStatus}`
+  badge.className = `badge ${{ healthy: 'operational', unhealthy: 'down' }[resolvedStatus] || resolvedStatus}`
   badge.textContent = labels[resolvedStatus]
   return badge
 }
@@ -61,7 +63,7 @@ const hostBadge = (status) => {
 const formatBytes = (bytes) => `${(bytes / (1024 ** 3)).toFixed(1)} GiB`
 const level = (status) => ({ critical: 3, warning: 2, unknown: 1, normal: 0 }[status] ?? 1)
 const serviceState = (project, containers) => {
-  if (project.status === 'down') return 'down'
+  if (project.status === 'down' || project.status === 'unhealthy') return project.status
   if (containers.some((container) => container.status === 'critical')) return 'degraded'
   return labels[project.status] ? project.status : 'unknown'
 }
@@ -230,6 +232,28 @@ const renderProject = (project, containers) => {
 
   card.append(header, endpoints, facts, releaseBlock)
 
+  if (Array.isArray(project.services) && project.services.length) {
+    const group = document.createElement('div')
+    group.className = 'service-containers'
+    const label = document.createElement('h3')
+    label.textContent = 'Service health'
+    group.append(label)
+    for (const probe of project.services) {
+      const row = document.createElement('div')
+      row.className = 'container-row service-probe'
+      const name = document.createElement('strong')
+      name.textContent = probe.service
+      const value = document.createElement('span')
+      value.className = 'container-state'
+      value.textContent = probe.kind === 'http' && probe.latency_ms != null ? `${probe.latency_ms} ms`
+        : probe.kind === 'heartbeat' && probe.age_seconds != null ? `${probe.age_seconds} s since heartbeat`
+          : probe.message || 'No measurement'
+      row.append(name, statusBadge(probe.status), value)
+      group.append(row)
+    }
+    card.append(group)
+  }
+
   if (containers.length) {
     const group = document.createElement('div')
     group.className = 'service-containers'
@@ -278,8 +302,8 @@ const updateSummary = (payload, containers) => {
   const projects = Array.isArray(payload.projects) ? payload.projects : []
   const states = projects.map((project) => serviceState(project,
     containers.filter((container) => container.project === project.name)))
-  const operational = states.filter((state) => state === 'operational').length
-  const down = states.filter((state) => state === 'down').length
+  const operational = states.filter((state) => state === 'operational' || state === 'healthy').length
+  const down = states.filter((state) => state === 'down' || state === 'unhealthy').length
   const attention = states.length - operational
   const status = !projects.length ? 'unknown' : operational === projects.length ? 'operational'
     : operational === 0 && down > 0 ? 'down' : down > 0 || states.includes('degraded') ? 'degraded' : 'unknown'
