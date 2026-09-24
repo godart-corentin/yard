@@ -82,8 +82,8 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
     let latest = state.pending.as_ref().or(state.current.as_ref());
     match latest {
         Some(release) => println!(
-            "  Last deployment: {} UTC ({})",
-            format_timestamp(release.deployed_at_unix),
+            "  Last deployment: {} ({})",
+            format_deployment_timestamp(release.deployed_at_unix),
             release.status,
         ),
         None => println!("  Last deployment: none recorded"),
@@ -277,6 +277,18 @@ fn format_age(modified: SystemTime) -> String {
     }
 }
 
+fn format_deployment_timestamp(unix: u64) -> String {
+    let timestamp = format_timestamp(unix);
+    if UNIX_EPOCH
+        .checked_add(Duration::from_secs(unix))
+        .map_or(true, |stamp| format_age(stamp) == "in future")
+    {
+        format!("{timestamp} UTC (in future)")
+    } else {
+        format!("{timestamp} UTC")
+    }
+}
+
 fn load_state(project: &Project) -> Result<ProjectState> {
     ProjectState::load(&project.state_path)
         .map_err(|error| YardError::Config(format!("{}: state unreadable: {error}", project.name)))
@@ -292,38 +304,36 @@ fn drift(project: &Project, state: &ProjectState, service: &ComposeService) -> O
             service.display_name()
         ));
     }
-    if [state.current.as_ref(), state.previous.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(|release| {
-            release
-                .services
-                .iter()
-                .any(|item| item.name == service.display_name() && item.image == service.image)
-                // Older releases lack per-service images. A tag alone cannot
-                // identify an image: only the configured repository is a safe
-                // fallback, and other repositories remain visibly uncertain.
-                || (release.services.is_empty()
-                    && service.image == format!("{}:{}", project.config.image.name, release.tag))
-        })
-    {
+    let releases = [
+        state.current.as_ref(),
+        state.previous.as_ref(),
+        state.pending.as_ref(),
+    ];
+    if releases.into_iter().flatten().any(|release| {
+        let recorded_image = release
+            .services
+            .iter()
+            .any(|item| item.name == service.display_name() && item.image == service.image);
+        // Older releases lack per-service images. A tag alone cannot
+        // identify an image: only the configured repository is a safe
+        // fallback, and other repositories remain visibly uncertain.
+        recorded_image
+            || (release.services.is_empty()
+                && service.image == format!("{}:{}", project.config.image.name, release.tag))
+    }) {
         return None;
     }
-    if [state.current.as_ref(), state.previous.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(|release| {
-            release.services.is_empty()
-                && service.image.rsplit_once(':').map(|(_, tag)| tag) == Some(release.tag.as_str())
-        })
-    {
+    if releases.into_iter().flatten().any(|release| {
+        release.services.is_empty()
+            && service.image.rsplit_once(':').map(|(_, tag)| tag) == Some(release.tag.as_str())
+    }) {
         Some(format!(
             "{} runs {}: cannot verify image against legacy release (configured repository {})",
             service.display_name(),
             service.image,
             project.config.image.name
         ))
-    } else if state.current.is_none() && state.previous.is_none() {
+    } else if releases.iter().all(Option::is_none) {
         Some(format!(
             "{} runs {} without a recorded release",
             service.display_name(),
@@ -331,9 +341,14 @@ fn drift(project: &Project, state: &ProjectState, service: &ComposeService) -> O
         ))
     } else {
         Some(format!(
-            "{} runs {} outside current/previous release",
+            "{} runs {} outside current/previous{} release",
             service.display_name(),
-            service.image
+            service.image,
+            if state.pending.is_some() {
+                "/pending"
+            } else {
+                ""
+            }
         ))
     }
 }
@@ -434,7 +449,7 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
             health
                 .iter()
                 .find(|item| item.service == *name)
-                .is_none_or(|item| item.status == Health::Unknown)
+                .map_or(true, |item| item.status == Health::Unknown)
         }) || !drifts.is_empty()
             || state.pending.is_some();
         let version = state
@@ -487,9 +502,9 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
             .or(state.current.as_ref())
             .map(|release| {
                 format!(
-                    "{} @ {} UTC",
+                    "{} @ {}",
                     release.status,
-                    format_timestamp(release.deployed_at_unix)
+                    format_deployment_timestamp(release.deployed_at_unix)
                 )
             })
             .unwrap_or_else(|| "none recorded".into());
