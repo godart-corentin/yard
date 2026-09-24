@@ -1,14 +1,32 @@
 use std::fs;
-use std::os::unix::fs::symlink;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{ErrorKind, Write};
+use std::net::TcpListener;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Fixture {
     root: PathBuf,
+}
+
+struct HealthServer {
+    url: String,
+    requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for HealthServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap();
+    }
 }
 
 impl Fixture {
@@ -33,6 +51,61 @@ impl Fixture {
                 self.root.display(), self.root.display()
             ),
         ).unwrap();
+    }
+
+    fn health_server(&self, healthy_image: Option<&str>) -> HealthServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/health", listener.local_addr().unwrap());
+        let root = self.root.clone();
+        let healthy_image = healthy_image.map(str::to_owned);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let count = Arc::clone(&requests);
+        let done = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !done.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        let healthy = healthy_image.as_ref().map_or(true, |image| {
+                            fs::read_to_string(root.join("running-api"))
+                                .is_ok_and(|running| running.trim() == image)
+                        });
+                        let status = if healthy {
+                            "200 OK"
+                        } else {
+                            "503 Service Unavailable"
+                        };
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .unwrap();
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("health listener: {error}"),
+                }
+            }
+        });
+        HealthServer {
+            url,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn configure_health(&self, server: &HealthServer) {
+        let path = self.root.join("projects/demo.toml");
+        let mut manifest = fs::read_to_string(&path).unwrap();
+        manifest.push_str(&format!(
+            "[deployment]\nhealth_url = \"{}\"\nhealth_attempts = 1\nhealth_interval_seconds = 1\n",
+            server.url
+        ));
+        fs::write(path, manifest).unwrap();
     }
 
     fn run(&self, command: &str) -> Output {
@@ -103,7 +176,12 @@ impl Fixture {
 test -r "$FAKE_ROOT/.env" || exit 13
 printf '%s | %s\n' "$*" "$IMAGE_TAG" >> "$FAKE_ROOT/docker.log"
 case " $* " in
-  *" config --format json "*) printf '{"services":{"api":{"image":"demo-api:%s"},"worker":{"image":"demo-worker:%s"}}}\n' "$IMAGE_TAG" "$IMAGE_TAG" ;;
+  *" config --format json "*)
+    if [ -f "$FAKE_ROOT/missing-worker" ]; then
+      printf '{"services":{"api":{"image":"demo-api:%s"}}}\n' "$IMAGE_TAG"
+    else
+      printf '{"services":{"api":{"image":"demo-api:%s"},"worker":{"image":"demo-worker:%s"}}}\n' "$IMAGE_TAG" "$IMAGE_TAG"
+    fi ;;
   *" image inspect "*) exit 0 ;;
   *" ps --format json "*)
     for service in api worker; do
@@ -407,6 +485,123 @@ fn deploys_two_services_at_one_revision_with_distinct_images() {
     assert!(log.contains("build worker"));
     assert!(log.contains("up -d --no-build --no-deps api"));
     assert!(log.contains("up -d --no-build --no-deps worker"));
+}
+
+#[test]
+fn declared_service_missing_from_compose_fails_at_deploy_not_load() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    fs::write(fixture.root.join("missing-worker"), "").unwrap();
+    assert!(fixture.run("status").status.success());
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("Compose service worker requires an image reference"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!fixture.root.join("state/demo.json").exists());
+}
+
+#[test]
+fn logs_pass_both_services_to_docker() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let result = fixture.run("logs");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    assert!(
+        log.contains("logs --tail 200 --follow api worker |"),
+        "{log}"
+    );
+}
+
+#[test]
+fn healthy_http_endpoint_activates_both_services() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let server = fixture.health_server(None);
+    fixture.configure_health(&server);
+    let result = fixture.run("deploy");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(server.requests.load(Ordering::Relaxed), 1);
+    let state = fixture.state();
+    assert_eq!(state["current"]["status"], "active");
+    assert!(state["pending"].is_null());
+    let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    assert!(log.contains("up -d --no-build --no-deps api"));
+    assert!(log.contains("up -d --no-build --no-deps worker"));
+}
+
+#[test]
+fn failed_http_health_restores_previous_services_and_clears_pending() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let old = fixture.state()["current"].clone();
+    fixture.next_revision();
+    let server = fixture.health_server(old["services"][0]["image"].as_str());
+    fixture.configure_health(&server);
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("service api") && error.contains("health check failed"),
+        "{error}"
+    );
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
+    assert_eq!(fixture.state()["current"]["revision"], old["revision"]);
+    assert!(fixture.state()["pending"].is_null());
+    for service in ["api", "worker"] {
+        let running = fs::read_to_string(fixture.root.join(format!("running-{service}"))).unwrap();
+        let expected = old["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == service)
+            .unwrap();
+        assert_eq!(running.trim(), expected["image"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn unverified_http_health_restoration_preserves_pending_release() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let old = fixture.state()["current"].clone();
+    fixture.next_revision();
+    let server = fixture.health_server(Some("never-healthy"));
+    fixture.configure_health(&server);
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("health check failed"));
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
+    let state = fixture.state();
+    assert_eq!(state["current"]["revision"], old["revision"]);
+    assert_eq!(state["pending"]["status"], "activating");
+    assert_ne!(state["pending"]["revision"], old["revision"]);
+    let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    assert_eq!(
+        log.matches("up -d --no-build --no-deps api").count(),
+        3,
+        "{log}"
+    );
+    assert!(!fixture.run("deploy").status.success());
 }
 
 #[test]
