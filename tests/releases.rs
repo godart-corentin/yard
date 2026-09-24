@@ -402,6 +402,7 @@ fn failed_offsite_copy_stops_deploy_without_marking_local_backup_failed() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr)
         .contains("off-site copy failed (local backup succeeded)"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("configuration error"));
     let state = fixture.state();
     assert_eq!(state["last_backup"]["result"], "success");
     assert_eq!(state["last_offsite"]["result"], "failure");
