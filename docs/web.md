@@ -84,6 +84,8 @@ GET /api/status
 
 The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (version 1) with the host metrics, applied thresholds, and statuses computed by the CLI. Web does not recompute warnings. A configured project with no Compose containers yet has `containers_status: "unknown"` and the message "No containers for a configured project"; only a stopped container is `Critical`. The host view becomes `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300 seconds; stale age is still shown. Override with `YARD_WEB_HOST_MAX_AGE_SECONDS`. The rest of `/api/status` continues to work. Project name `host` is reserved for the snapshot filename.
 
+The dashboard's **Host** section shows only CPU, RAM, physical disks and the measurement age. Its badge reflects the most severe CPU/RAM/disk status (or `Unknown` if the snapshot is unavailable); stopped containers, load and Docker usage do not affect it. The **Services** section lists each container beneath its matching project card, with the Compose service name, state and status. A stopped container degrades its service even when the HTTP check succeeds; a failed HTTP check leaves the service `Down`. The Services badge and summary counts reflect these displayed service states. Without a fresh host snapshot, container states cannot be shown and project badges reflect HTTP health alone. The CLI still displays Load, Docker usage and containers, and `/api/status` still exposes all of them in the snapshot; they are simply not displayed in Host.
+
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
 
 ## Update
@@ -112,7 +114,7 @@ Basic Auth is enforced by Caddy, not by the application container.
 - never reads application `.env` files or secrets;
 - reads only known public fields from the host snapshot (no arbitrary JSON forwarding).
 
-Only `deployment.health_url` and Yard's deployment metadata are exposed to the web UI.
+Only `deployment.health_url`, Yard's deployment metadata and the sanitized host snapshot are exposed to the web UI; application environment files are never read.
 
 ## Remove
 

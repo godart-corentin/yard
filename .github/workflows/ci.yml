@@ -31,5 +31,7 @@ jobs:
         run: cargo clippy --manifest-path web/Cargo.toml --all-targets -- -D warnings
       - name: Web tests
         run: cargo test --manifest-path web/Cargo.toml --locked
+      - name: Dashboard tests
+        run: node --test web/tests/*.test.mjs
       - name: Installer syntax
         run: bash -n install.sh install-web.sh uninstall-web.sh update.sh

@@ -268,15 +268,6 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-.host-secondary {
-  grid-column: 1 / -1;
-  margin: -4px 0 0;
-  color: var(--subtle);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .projects {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -578,10 +569,6 @@ a:focus-visible {
 
   .service-card {
     min-height: 0;
-  }
-
-  .host-secondary {
-    font-size: 11px;
   }
 }
 

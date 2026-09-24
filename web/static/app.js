@@ -8,8 +8,6 @@ const refreshEl = document.querySelector('#refresh')
 const hostMetricsEl = document.querySelector('#host-metrics')
 const hostBadgeEl = document.querySelector('#host-badge')
 const hostAgeEl = document.querySelector('#host-age')
-// Prototype toggle: both screenshots use the same API response and styles.
-const showSecondaryHostLine = new URLSearchParams(location.search).get('variant') === 'b'
 
 const labels = {
   operational: 'Operational',
@@ -96,7 +94,7 @@ const renderHost = (host) => {
     card.append(header, detail)
     hostMetricsEl.append(card)
   }
-  // Containers belong to Services; hidden Load/Docker diagnostics do not drive HOST.
+  // Container and Docker diagnostics remain in the API, not in the host badge.
   const states = [snapshot.cpu.status, snapshot.memory.status,
     ...snapshot.disks.map((disk) => disk.status)]
   const overall = states.reduce((highest, status) => level(status) > level(highest) ? status : highest, 'normal')
@@ -109,13 +107,6 @@ const renderHost = (host) => {
   for (const disk of snapshot.disks) {
     const value = disk.value
     addMetric(`Disk ${value?.mount || ''}`, disk, value ? `${formatBytes(value.used_bytes)} / ${formatBytes(value.total_bytes)}` : null)
-  }
-  if (showSecondaryHostLine) {
-    const docker = snapshot.docker.value
-    const secondary = document.createElement('p')
-    secondary.className = 'host-secondary'
-    secondary.textContent = `Load ${snapshot.load.value?.map((v) => v.toFixed(2)).join('/') || '—'} · Docker ${docker ? `${docker.images} img / ${docker.containers} ctr / ${docker.volumes} vol` : 'unavailable'}`
-    hostMetricsEl.append(secondary)
   }
 }
 
