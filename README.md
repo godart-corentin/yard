@@ -159,6 +159,8 @@ Secrets do **not** belong in Yard manifests. Keep them in the application's own 
 
 Yard records the latest local backup attempt and the separate off-site copy attempt in the project state. `yard status` and the Web dashboard show the outcome, start time, duration and configured destination. If `backup.directory` or `backup.offsite_destination` is omitted, the destination is unknown; Yard does not infer a file, size or file count from the command or existing files. Without a recorded run, both views say so explicitly. An off-site failure is recorded separately and makes the command fail (and stops deploy/rollback before activation), while the local attempt remains a success. An unsuccessful local backup skips the off-site command. Existing manifests need no changes.
 
+If a stored backup attempt has invalid fields, `yard status` rejects the state file; the Web API returns a sanitized `{"result":"invalid"}` record and the dashboard displays “Invalid backup record” instead of claiming no backup was recorded.
+
 ## Commands
 
 ```bash

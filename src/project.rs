@@ -317,11 +317,7 @@ impl Project {
                 destination: backup.offsite_destination.clone(),
             });
             state.save(&self.state_path)?;
-            result.map_err(|error| {
-                YardError::Config(format!(
-                    "off-site copy failed (local backup succeeded): {error}"
-                ))
-            })?;
+            result.map_err(|error| YardError::OffsiteCopyFailed(Box::new(error)))?;
         }
         Ok(())
     }
