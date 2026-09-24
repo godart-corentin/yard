@@ -124,6 +124,80 @@ fn complete_project_keeps_all_existing_fields_and_adds_deployment_health_and_dis
 }
 
 #[test]
+fn future_deployment_is_marked_in_detail_and_overview_without_changing_past_deployments() {
+    let fixture = Fixture::new();
+    fixture.state(full_state());
+    let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(
+        detail.contains("Last deployment: 1970-01-01 00:00:42 UTC (active)"),
+        "{detail}"
+    );
+    assert!(
+        overview.contains("deployment active @ 1970-01-01 00:00:42 UTC"),
+        "{overview}"
+    );
+    assert!(!detail.contains("in future") && !overview.contains("in future"));
+
+    fixture.state(&full_state().replace(
+        "\"deployed_at_unix\":42",
+        "\"deployed_at_unix\":99999999999",
+    ));
+    let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(
+        detail.contains("Last deployment: 5138-") && detail.contains("UTC (in future) (active)"),
+        "{detail}"
+    );
+    assert!(
+        overview.contains("deployment active @ 5138-") && overview.contains("UTC (in future)"),
+        "{overview}"
+    );
+}
+
+#[test]
+fn pending_release_running_image_is_not_drift_but_other_images_still_are() {
+    let fixture = Fixture::new();
+    let mut state: serde_json::Value = serde_json::from_str(full_state()).unwrap();
+    state["pending"] = serde_json::json!({
+        "revision": "next",
+        "tag": "next",
+        "deployed_at_unix": 43,
+        "status": "activating",
+        "services": [{"name": "api", "image": "app:next"}]
+    });
+    fixture.state(&state.to_string());
+    let docker = fixture.root.join("bin/docker");
+    fs::write(&docker, "#!/bin/sh\ncase \"$*\" in *'ps --all --format json'*) printf '%s\\n' '{\"Service\":\"api\",\"State\":\"running\",\"Image\":\"app:next\"}' ;; esac\n").unwrap();
+    let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(
+        detail.contains("WARNING:") && detail.contains("Docker: MISMATCH"),
+        "{detail}"
+    );
+    assert!(
+        overview.contains("ALERT demo") && overview.contains("pending release"),
+        "{overview}"
+    );
+    assert!(
+        !detail.contains("DRIFT") && !overview.contains("DRIFT"),
+        "{detail}\n{overview}"
+    );
+
+    fs::write(&docker, "#!/bin/sh\ncase \"$*\" in *'ps --all --format json'*) printf '%s\\n' '{\"Service\":\"api\",\"State\":\"running\",\"Image\":\"app:rogue\"}' ;; esac\n").unwrap();
+    let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(
+        detail.contains("DRIFT") && detail.contains("app:rogue"),
+        "{detail}"
+    );
+    assert!(
+        overview.contains("DRIFT") && overview.contains("app:rogue"),
+        "{overview}"
+    );
+}
+
+#[test]
 fn previous_image_is_not_drift() {
     let fixture = Fixture::new();
     fixture.state(full_state());
