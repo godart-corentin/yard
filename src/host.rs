@@ -566,10 +566,14 @@ pub fn render(snapshot: &Snapshot) -> String {
 
 pub fn run(projects_dir: &Path, state_dir: &Path) {
     let snapshot = collect(projects_dir);
-    if let Err(error) = save(&snapshot, state_dir) {
+    publish(&snapshot, state_dir);
+}
+
+pub fn publish(snapshot: &Snapshot, state_dir: &Path) {
+    if let Err(error) = save(snapshot, state_dir) {
         eprintln!("yard: cannot save host snapshot: {error}");
     }
-    println!("{}", render(&snapshot));
+    println!("{}", render(snapshot));
 }
 
 #[cfg(test)]

@@ -22,8 +22,8 @@ pub enum Command {
     /// List configured projects.
     List,
 
-    /// Show Git, Yard and Compose state for a project.
-    Status { project: String },
+    /// Show Git, Yard and Compose state for a project, or summarize all projects.
+    Status { project: Option<String> },
 
     /// Collect and display host metrics; refresh the Web snapshot.
     Host,

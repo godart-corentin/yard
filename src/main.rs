@@ -62,8 +62,12 @@ fn run() -> Result<()> {
             }
         }
         Command::Status { project } => {
-            let project = Project::load(&project, &projects_dir, &state_dir)?;
-            status::run(&project, &projects_dir, &state_dir)?;
+            if let Some(name) = project {
+                let project = Project::load(&name, &projects_dir, &state_dir)?;
+                status::run(&project, &projects_dir, &state_dir)?;
+            } else {
+                status::overview(&projects_dir, &state_dir)?;
+            }
         }
         Command::Host => host::run(&projects_dir, &state_dir),
         Command::Images { prune, yes } => images::run(&projects_dir, &state_dir, prune && yes)?,

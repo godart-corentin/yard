@@ -217,9 +217,16 @@ impl Project {
 
     pub fn runtime_report(&self, release: &Release) -> Result<(bool, String)> {
         let output = self.compose_ps()?;
+        Self::runtime_report_from_output(release, &output)
+    }
+
+    pub(crate) fn runtime_report_from_output(
+        release: &Release,
+        output: &str,
+    ) -> Result<(bool, String)> {
         let containers: Vec<serde_json::Value> = if output.trim().is_empty() {
             Vec::new()
-        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(&output) {
+        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(output) {
             array
         } else {
             output
