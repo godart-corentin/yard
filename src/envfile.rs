@@ -24,12 +24,7 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>> {
 }
 
 pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(YardError::Config(format!(
-            "refusing symbolic link at {}",
-            path.display()
-        )));
-    }
+    check_writable(path)?;
     let contents = fs::read_to_string(path)?;
     let prefix = format!("{key}=");
     let matches = contents
@@ -62,6 +57,17 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
         }
         output.push_str(&format!("{key}={value}\n"));
     }
+    check_writable(path)?;
+    atomic_file::write(path, output.as_bytes())
+}
+
+pub fn check_writable(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(YardError::Config(format!(
+            "refusing symbolic link at {}; replace it with a regular .env file before retrying",
+            path.display()
+        )));
+    }
 
     let parent = path
         .parent()
@@ -78,14 +84,14 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<()> {
     match fs::symlink_metadata(&legacy_tmp) {
         Ok(_) => {
             return Err(YardError::Config(format!(
-                "refusing pre-existing temporary file at {}",
+                "refusing pre-existing temporary file at {}; inspect and remove it before retrying",
                 legacy_tmp.display()
             )))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    atomic_file::write(path, output.as_bytes())
+    Ok(())
 }
 
 #[cfg(test)]

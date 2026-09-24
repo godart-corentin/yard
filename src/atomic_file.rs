@@ -35,12 +35,7 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
                 .unwrap_or("yard"),
             suffix
         ));
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-        {
+        let mut file = match create_temp(&tmp) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -71,10 +66,38 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
     .into())
 }
 
+// Isolate allocation so the test can force a collision; production supplies random names.
+fn create_temp(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn forced_temp_collision_does_not_open_a_planted_symlink() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("atomic-file-collision-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        let tmp = root.join(".target.forced.tmp");
+        fs::write(&victim, "intact\n").unwrap();
+        symlink(&victim, &tmp).unwrap();
+        assert_eq!(
+            create_temp(&tmp).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "intact\n");
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn failed_rename_cleans_its_temporary_file() {

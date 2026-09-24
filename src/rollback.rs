@@ -9,6 +9,7 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
     project.ensure_clean()?;
 
     let mut state = ProjectState::load(&project.state_path)?;
+    project.check_tag_writable()?;
     let recovering = state.pending.is_some() && revision.is_none();
     let recovering_first = recovering && state.current.is_none();
     let mut current = if recovering_first {
@@ -65,6 +66,7 @@ pub fn run(project: &Project, revision: Option<&str>) -> Result<()> {
 
     let mut pending = target.clone();
     pending.status = "activating".to_owned();
+    project.check_tag_writable()?;
     state.pending = Some(pending);
     state.save(&project.state_path)?;
     project.persist_tag(&target.tag)?;

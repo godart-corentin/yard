@@ -270,6 +270,16 @@ More detail is available in [`docs/web.md`](docs/web.md).
 
 Build or migration failures leave the active release unchanged and report the running containers. If activation or the health check fails, Yard names the failing service (the configured HTTP check is associated with the first service), reports actual Compose containers, and attempts to restore the previous application images for *all* services. It never records a partially activated release as active. A pending release marker is written before changing the Compose tag and cleared only after a verified activation or restoration; `yard status` highlights pending work and image mismatches. After an interrupted/failed restoration, inspect `yard status` and run `yard rollback <project>` to restore the last recorded active release before attempting another deploy.
 
+Compose `.env` files that are symbolic links are now refused by `yard deploy` and `yard rollback` (a change from earlier versions, which followed the link). Replace the link with a regular file at the configured `[compose].directory` / `[compose].env_file` path before retrying; keep its permissions and contents protected. Yard also refuses to reuse the old predictable temporary file: for `env_file = ".env"` in `/srv/hello-api/deploy`, it is `/srv/hello-api/deploy/..env.yard.tmp` (two leading dots). A leftover from an earlier Yard version, or any other planted file or link at that path, must be inspected and removed **manually**; Yard never deletes a pre-existing path. For example:
+
+```bash
+ls -ld -- /srv/hello-api/deploy/..env.yard.tmp
+# After checking it is not needed, remove the path itself (not a link target):
+rm -- /srv/hello-api/deploy/..env.yard.tmp
+```
+
+After a refusal, read the exact path and reason in the error, inspect `yard status <project>` and the path, then correct the `.env` link or remove the confirmed obsolete temporary file. A refusal detected before activation leaves no new `pending` marker; retry `yard deploy <project>` once the obstruction is gone. If `yard status` already reports a `pending` release from an interrupted run, remove the obstruction first, run `yard rollback <project>` to recover the last active release, check status, and only then retry deploy. Do not edit the state JSON by hand.
+
 Database rollback is deliberately separate. Yard never restores a database automatically just because an application image was rolled back.
 
 Yard treats long-lived dependencies such as databases as already-provisioned infrastructure. A migration service may start the dependencies it needs, but release activation itself uses `docker compose up --no-deps` so a routine application deploy does not unexpectedly recreate PostgreSQL, Redis, or other persistent services.

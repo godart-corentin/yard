@@ -146,6 +146,10 @@ impl Project {
         envfile::set(&path, &self.config.image.tag_env, tag)
     }
 
+    pub fn check_tag_writable(&self) -> Result<()> {
+        envfile::check_writable(&self.config.compose_env_path())
+    }
+
     pub fn compose_build(&self, tag: &str, service: &str) -> Result<()> {
         let mut args = self.compose_args();
         args.push("build".to_owned());

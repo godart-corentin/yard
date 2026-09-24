@@ -14,6 +14,7 @@ pub fn run(project: &Project) -> Result<()> {
             "an interrupted release is pending; run yard status and yard rollback first".into(),
         ));
     }
+    project.check_tag_writable()?;
     let old_revision = project.head_revision()?;
     let old_tag = if let Some(current) = &state.current {
         current.tag.clone()
@@ -99,6 +100,8 @@ pub fn run(project: &Project) -> Result<()> {
             release
         });
     }
+    // Builds may take long enough for a legacy temporary to appear since preflight.
+    project.check_tag_writable()?;
     state.pending = Some(pending);
     state.save(&project.state_path)?;
 
