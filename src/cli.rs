@@ -41,11 +41,27 @@ pub enum Command {
     /// Deploy the configured branch for a project.
     Deploy { project: String },
 
-    /// Roll back to the previous deployment or to an already-built revision.
+    /// Restore an explicitly named application revision (never data).
     Rollback {
         project: String,
         revision: Option<String>,
+        #[arg(long)]
+        yes: bool,
     },
+
+    /// Restore an explicitly named application revision (never data).
+    Restore {
+        project: String,
+        revision: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// List recorded application releases and backup attempts.
+    RestorePoints { project: String },
+
+    /// Show the append-only restore attempt journal.
+    RestoreLog { project: String },
 
     /// Show application logs (following them by default).
     Logs {
