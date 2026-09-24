@@ -1,9 +1,11 @@
 use std::env;
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +15,7 @@ use crate::command;
 use crate::project::Project;
 
 pub const SNAPSHOT_FILE: &str = "host.json";
+static NEXT_SNAPSHOT_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -391,8 +394,10 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
                         containers.extend(found);
                     }
                     Some(_) => {
-                        containers_status = Level::Critical;
-                        containers_message = Some("No containers");
+                        if containers_status == Level::Normal {
+                            containers_status = Level::Unknown;
+                            containers_message = Some("No containers for a configured project");
+                        }
                     }
                     None => {
                         if containers_status != Level::Critical {
@@ -407,6 +412,11 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
             containers_status = Level::Unknown;
             containers_message = Some("Containers unavailable");
         }
+    }
+    // A stopped container is the reason for a Critical aggregate, not an
+    // unrelated unavailable or never-deployed project.
+    if containers_status == Level::Critical {
+        containers_message = None;
     }
     Snapshot {
         version: 1,
@@ -429,10 +439,30 @@ pub fn collect(projects_dir: &Path) -> Snapshot {
 pub fn save(snapshot: &Snapshot, state_dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(state_dir)?;
     let path = state_dir.join(SNAPSHOT_FILE);
-    let tmp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(snapshot)?;
-    fs::write(&tmp, data)?;
-    fs::rename(tmp, path)
+    // Exclusive creation keeps concurrent threads and processes independent, even if a
+    // stale temporary file is left by a process that was killed before rename.
+    for _ in 0..32 {
+        let next = NEXT_SNAPSHOT_FILE.fetch_add(1, Ordering::Relaxed);
+        let tmp = state_dir.join(format!("host.json.{}.{next}.tmp", std::process::id()));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = file.write_all(&data).and_then(|()| {
+            drop(file);
+            fs::rename(&tmp, &path)
+        });
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no available host snapshot temporary name",
+    ))
 }
 
 fn size(bytes: u64) -> String {
@@ -522,8 +552,8 @@ pub fn render(snapshot: &Snapshot) -> String {
 
 pub fn run(projects_dir: &Path, state_dir: &Path) {
     let snapshot = collect(projects_dir);
-    if save(&snapshot, state_dir).is_err() {
-        eprintln!("yard: host snapshot unavailable");
+    if let Err(error) = save(&snapshot, state_dir) {
+        eprintln!("yard: cannot save host snapshot: {error}");
     }
     println!("{}", render(&snapshot));
 }
@@ -531,6 +561,99 @@ pub fn run(projects_dir: &Path, state_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
+    use std::sync::Arc;
+
+    fn sample_snapshot() -> Snapshot {
+        Snapshot {
+            version: 1,
+            collected_at_unix: 42,
+            thresholds: Thresholds {
+                disk_warn_percent: 80,
+                disk_crit_percent: 90,
+                mem_pressure_percent: 85,
+            },
+            cpu: Metric::known(45.0, Level::Normal),
+            load: Metric::known([1.0, 2.0, 3.0], Level::Normal),
+            memory: Metric::known(
+                Memory {
+                    used_bytes: 1_073_741_824,
+                    total_bytes: 2_147_483_648,
+                },
+                Level::Warning,
+            ),
+            disks: vec![Metric::known(
+                Disk {
+                    mount: "/".into(),
+                    used_bytes: 1_073_741_824,
+                    total_bytes: 2_147_483_648,
+                },
+                Level::Critical,
+            )],
+            docker: Metric::unknown("Docker unavailable"),
+            containers: vec![],
+            containers_status: Level::Unknown,
+            containers_message: Some("Containers unavailable"),
+        }
+    }
+
+    fn temp_state(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            env::temp_dir().join(format!("yard-host-{label}-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_atomically_replaces_existing_snapshot_without_following_symlink() {
+        let dir = temp_state("atomic");
+        let original = dir.join("original.json");
+        fs::write(&original, "original").unwrap();
+        symlink(&original, dir.join(SNAPSHOT_FILE)).unwrap();
+        save(&sample_snapshot(), &dir).unwrap();
+        assert_eq!(fs::read_to_string(&original).unwrap(), "original");
+        assert!(!fs::symlink_metadata(dir.join(SNAPSHOT_FILE))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(SNAPSHOT_FILE)).unwrap()).unwrap();
+        assert_eq!(published["version"], 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_saves_all_succeed_and_leave_no_temporary_files() {
+        let dir = temp_state("concurrent");
+        let snapshot = Arc::new(sample_snapshot());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                let snapshot = Arc::clone(&snapshot);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..10 {
+                        save(&snapshot, &dir).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in threads {
+            handle.join().unwrap();
+        }
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(SNAPSHOT_FILE)).unwrap()).unwrap();
+        assert_eq!(published["version"], 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn parses_cpu_counters_and_computes_busy_delta() {
@@ -600,36 +723,7 @@ mod tests {
     }
     #[test]
     fn renders_host_without_reading_the_machine() {
-        let snapshot = Snapshot {
-            version: 1,
-            collected_at_unix: 42,
-            thresholds: Thresholds {
-                disk_warn_percent: 80,
-                disk_crit_percent: 90,
-                mem_pressure_percent: 85,
-            },
-            cpu: Metric::known(45.0, Level::Normal),
-            load: Metric::known([1.0, 2.0, 3.0], Level::Normal),
-            memory: Metric::known(
-                Memory {
-                    used_bytes: 1_073_741_824,
-                    total_bytes: 2_147_483_648,
-                },
-                Level::Warning,
-            ),
-            disks: vec![Metric::known(
-                Disk {
-                    mount: "/".into(),
-                    used_bytes: 1_073_741_824,
-                    total_bytes: 2_147_483_648,
-                },
-                Level::Critical,
-            )],
-            docker: Metric::unknown("Docker unavailable"),
-            containers: vec![],
-            containers_status: Level::Unknown,
-            containers_message: Some("Containers unavailable"),
-        };
+        let snapshot = sample_snapshot();
         let text = render(&snapshot);
         assert!(text.starts_with("HOST\n"));
         assert!(text.contains("CPU          45.0% [Normal]"));

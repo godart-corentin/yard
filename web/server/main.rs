@@ -695,6 +695,8 @@ fn main() {
 mod tests {
     use super::*;
 
+    const VALID_HOST: &str = r#"{"version":1,"collected_at_unix":1000,"thresholds":{"disk_warn_percent":80,"disk_crit_percent":90,"mem_pressure_percent":85},"cpu":{"value":40.0,"status":"normal","message":null},"load":{"value":[1,2,3],"status":"normal","message":null},"memory":{"value":{"used_bytes":50,"total_bytes":100},"status":"warning","message":null},"disks":[],"docker":{"value":null,"status":"unknown","message":"Docker unavailable"},"containers":[],"containers_status":"unknown","containers_message":null,"secret":"DO_NOT_EXPOSE"}"#;
+
     fn project(status: &str) -> ProjectStatus {
         ProjectStatus {
             name: "test".to_owned(),
@@ -834,8 +836,35 @@ mod tests {
         assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
         fs::write(dir.join("host.json"), "{").unwrap();
         assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
-        fs::write(dir.join("host.json"), r#"{"version":99}"#).unwrap();
-        assert_eq!(load_host(&dir, 1000, 300).status, "unknown");
+        let mut unknown: Value = serde_json::from_str(VALID_HOST).unwrap();
+        unknown["version"] = serde_json::json!(99);
+        fs::write(dir.join("host.json"), serde_json::to_vec(&unknown).unwrap()).unwrap();
+        let loaded = load_host(&dir, 1000, 300);
+        assert_eq!(loaded.status, "unknown");
+        assert_eq!(loaded.message, "Host snapshot version unknown");
+        assert!(loaded.snapshot.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn never_deployed_project_remains_unknown_in_web_payload() {
+        let dir = temp_dir("host-empty-compose");
+        let mut snapshot: Value = serde_json::from_str(VALID_HOST).unwrap();
+        snapshot["containers_message"] =
+            serde_json::json!("No containers for a configured project");
+        fs::write(
+            dir.join("host.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let host = load_host(&dir, 1000, 300);
+        assert_eq!(host.status, "available");
+        let payload = serde_json::to_value(&host).unwrap();
+        assert_eq!(payload["snapshot"]["containers_status"], "unknown");
+        assert_eq!(
+            payload["snapshot"]["containers_message"],
+            "No containers for a configured project"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -887,7 +916,7 @@ mod tests {
     #[test]
     fn host_snapshot_is_fresh_then_stale_and_does_not_expose_extra_fields() {
         let dir = temp_dir("host-fresh");
-        fs::write(dir.join("host.json"), r#"{"version":1,"collected_at_unix":1000,"thresholds":{"disk_warn_percent":80,"disk_crit_percent":90,"mem_pressure_percent":85},"cpu":{"value":40.0,"status":"normal","message":null},"load":{"value":[1,2,3],"status":"normal","message":null},"memory":{"value":{"used_bytes":50,"total_bytes":100},"status":"warning","message":null},"disks":[],"docker":{"value":null,"status":"unknown","message":"Docker unavailable"},"containers":[],"containers_status":"unknown","containers_message":null,"secret":"DO_NOT_EXPOSE"}"#).unwrap();
+        fs::write(dir.join("host.json"), VALID_HOST).unwrap();
         let fresh = load_host(&dir, 1300, 300);
         assert_eq!(fresh.status, "available");
         assert_eq!(fresh.age_seconds, Some(300));
