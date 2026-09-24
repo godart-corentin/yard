@@ -143,7 +143,7 @@ pub fn run(project: &Project, projects_dir: &Path, state_dir: &Path) -> Result<(
         println!("  unavailable [Unknown]");
     }
     for service in services.as_deref().unwrap_or(&[]) {
-        if let Some(reason) = drift(&state, service) {
+        if let Some(reason) = drift(project, &state, service) {
             println!("  DRIFT: {reason}");
         }
     }
@@ -282,7 +282,7 @@ fn load_state(project: &Project) -> Result<ProjectState> {
         .map_err(|error| YardError::Config(format!("{}: state unreadable: {error}", project.name)))
 }
 
-fn drift(state: &ProjectState, service: &ComposeService) -> Option<String> {
+fn drift(project: &Project, state: &ProjectState, service: &ComposeService) -> Option<String> {
     if !service.state.eq_ignore_ascii_case("running") {
         return None;
     }
@@ -300,14 +300,30 @@ fn drift(state: &ProjectState, service: &ComposeService) -> Option<String> {
                 .services
                 .iter()
                 .any(|item| item.name == service.display_name() && item.image == service.image)
+                // Older releases lack per-service images. A tag alone cannot
+                // identify an image: only the configured repository is a safe
+                // fallback, and other repositories remain visibly uncertain.
                 || (release.services.is_empty()
-                    && service.image.rsplit_once(':').map(|(_, tag)| tag)
-                        == Some(release.tag.as_str()))
+                    && service.image == format!("{}:{}", project.config.image.name, release.tag))
         })
     {
         return None;
     }
-    if state.current.is_none() && state.previous.is_none() {
+    if [state.current.as_ref(), state.previous.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|release| {
+            release.services.is_empty()
+                && service.image.rsplit_once(':').map(|(_, tag)| tag) == Some(release.tag.as_str())
+        })
+    {
+        Some(format!(
+            "{} runs {}: cannot verify image against legacy release (configured repository {})",
+            service.display_name(),
+            service.image,
+            project.config.image.name
+        ))
+    } else if state.current.is_none() && state.previous.is_none() {
         Some(format!(
             "{} runs {} without a recorded release",
             service.display_name(),
@@ -393,7 +409,7 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|service| drift(&state, service))
+            .filter_map(|service| drift(&project, &state, service))
             .collect();
         let health: Vec<&ServiceHealth> = snapshot
             .services
@@ -414,6 +430,11 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
         }) || health.iter().any(|item| {
             matches!(item.status, Health::Degraded | Health::Unhealthy)
                 || item.message == Some("Container unavailable")
+        }) || project.config.service_health.keys().any(|name| {
+            health
+                .iter()
+                .find(|item| item.service == *name)
+                .is_none_or(|item| item.status == Health::Unknown)
         }) || !drifts.is_empty()
             || state.pending.is_some();
         let version = state

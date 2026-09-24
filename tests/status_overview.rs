@@ -143,6 +143,49 @@ fn legacy_release_without_service_images_uses_its_recorded_tag() {
 }
 
 #[test]
+fn legacy_release_does_not_accept_an_unrelated_image_with_the_same_tag() {
+    let fixture = Fixture::new();
+    fixture.state(r#"{"current":{"revision":"current","tag":"current","deployed_at_unix":42},"previous":null}"#);
+    fs::write(fixture.root.join("bin/docker"), "#!/bin/sh\ncase \"$*\" in *'ps --all --format json'*) printf '%s\\n' '{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\",\"Image\":\"other:current\"}' ;; esac\n").unwrap();
+    let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+    assert!(
+        detail.contains("DRIFT") && detail.contains("other:current"),
+        "{detail}"
+    );
+    let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+    assert!(
+        overview.contains("ALERT demo") && overview.contains("DRIFT"),
+        "{overview}"
+    );
+}
+
+#[test]
+fn unreadable_or_future_heartbeat_is_an_overview_alert() {
+    let fixture = Fixture::new();
+    fixture.state(full_state());
+    let manifest = fixture.root.join("projects/demo.toml");
+    let mut config = fs::read_to_string(&manifest).unwrap();
+    config.push_str(
+        "[service_health.api]\ntype = 'heartbeat'\npath = '/run/beat'\nmax_age_seconds = 30\n",
+    );
+    fs::write(manifest, config).unwrap();
+    let docker = fixture.root.join("bin/docker");
+    for stamp in ["garbage", "99999999999"] {
+        fs::write(&docker, format!("#!/bin/sh\ncase \"$*\" in\n  *'system df'*) exit 1 ;;\n  *'ps --all --format json'*) printf '%s\\n' '{{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\",\"Image\":\"app:current\"}}' ;;\n  *'exec -T api stat'*) printf '%s\\n' '{stamp}' ;;\n  *) exit 1 ;;\nesac\n")).unwrap();
+        let overview = String::from_utf8_lossy(&fixture.run(None).stdout).into_owned();
+        assert!(
+            overview.contains("ALERT demo") && overview.contains("api=Unknown"),
+            "{stamp}: {overview}"
+        );
+        let detail = String::from_utf8_lossy(&fixture.run(Some("demo")).stdout).into_owned();
+        assert!(
+            detail.contains("Heartbeat missing, unreadable or in the future"),
+            "{stamp}: {detail}"
+        );
+    }
+}
+
+#[test]
 fn unreadable_state_is_never_reported_as_no_deployment_or_healthy() {
     let fixture = Fixture::new();
     fixture.state("not json");
