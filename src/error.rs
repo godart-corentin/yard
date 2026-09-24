@@ -21,6 +21,9 @@ pub enum YardError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    #[error("off-site copy failed (local backup succeeded): {0}")]
+    OffsiteCopyFailed(#[source] Box<YardError>),
+
     #[error("project not found: {0}")]
     ProjectNotFound(String),
 

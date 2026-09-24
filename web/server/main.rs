@@ -85,6 +85,19 @@ enum BackupResult {
     Failure,
 }
 
+// Keep unreadable records visible without exposing their raw contents through the API.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+enum BackupRecord {
+    Attempt(BackupAttempt),
+    Invalid(InvalidBackup),
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InvalidBackup {
+    result: &'static str,
+}
+
 #[derive(Debug, Deserialize)]
 struct Deployment {
     health_url: Option<String>,
@@ -96,8 +109,8 @@ struct Project {
     health_url: Option<String>,
     release: Option<Value>,
     pending_release: Option<Value>,
-    last_backup: Option<BackupAttempt>,
-    last_offsite: Option<BackupAttempt>,
+    last_backup: Option<BackupRecord>,
+    last_offsite: Option<BackupRecord>,
     offsite_configured: Option<bool>,
     config_error: Option<String>,
 }
@@ -108,8 +121,8 @@ struct ProjectStatus {
     health_url: Option<String>,
     release: Option<Value>,
     pending_release: Option<Value>,
-    last_backup: Option<BackupAttempt>,
-    last_offsite: Option<BackupAttempt>,
+    last_backup: Option<BackupRecord>,
+    last_offsite: Option<BackupRecord>,
     offsite_configured: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
@@ -317,7 +330,8 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             if name == "host" {
                 return None;
             }
-            let (release, pending_release, last_backup, last_offsite) = load_project_state(state_dir, &name);
+            let (release, pending_release, last_backup, last_offsite) =
+                load_project_state(state_dir, &name);
             let parsed = fs::read_to_string(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|contents| {
@@ -336,7 +350,12 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                     pending_release,
                     last_backup,
                     last_offsite,
-                    offsite_configured: Some(config.backup.and_then(|backup| backup.offsite_command).is_some()),
+                    offsite_configured: Some(
+                        config
+                            .backup
+                            .and_then(|backup| backup.offsite_command)
+                            .is_some(),
+                    ),
                     config_error: None,
                 },
                 Err(error) => Project {
@@ -354,7 +373,15 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
         .collect()
 }
 
-fn load_project_state(state_dir: &Path, project: &str) -> (Option<Value>, Option<Value>, Option<BackupAttempt>, Option<BackupAttempt>) {
+fn load_project_state(
+    state_dir: &Path,
+    project: &str,
+) -> (
+    Option<Value>,
+    Option<Value>,
+    Option<BackupRecord>,
+    Option<BackupRecord>,
+) {
     // host.json is reserved for the CLI's host snapshot, never project state.
     if project == "host" {
         return (None, None, None, None);
@@ -369,10 +396,24 @@ fn load_project_state(state_dir: &Path, project: &str) -> (Option<Value>, Option
             .filter(|value| value.is_object())
             .cloned()
     };
-    let backup = |name| state.as_ref()
-        .and_then(|value| value.get(name))
-        .and_then(|value| serde_json::from_value::<BackupAttempt>(value.clone()).ok());
-    (field("current"), field("pending"), backup("last_backup"), backup("last_offsite"))
+    let backup = |name| {
+        state
+            .as_ref()
+            .and_then(|value| value.get(name))
+            .filter(|value| !value.is_null())
+            .map(
+                |value| match serde_json::from_value::<BackupAttempt>(value.clone()) {
+                    Ok(attempt) => BackupRecord::Attempt(attempt),
+                    Err(_) => BackupRecord::Invalid(InvalidBackup { result: "invalid" }),
+                },
+            )
+    };
+    (
+        field("current"),
+        field("pending"),
+        backup("last_backup"),
+        backup("last_offsite"),
+    )
 }
 
 fn check_projects(projects: Vec<Project>, client: &Client) -> Vec<ProjectStatus> {
@@ -817,7 +858,11 @@ mod tests {
         let state = root.join("state");
         fs::create_dir_all(&projects).unwrap();
         fs::create_dir_all(&state).unwrap();
-        fs::write(projects.join("demo.toml"), "[backup]\noffsite_command = [\"copy\"]\n").unwrap();
+        fs::write(
+            projects.join("demo.toml"),
+            "[backup]\noffsite_command = [\"copy\"]\n",
+        )
+        .unwrap();
         fs::write(state.join("demo.json"), r#"{"current":null,"last_backup":{"started_at_unix":123,"duration_ms":7,"result":"success","destination":"/archive","secret":"not-public"},"last_offsite":{"started_at_unix":124,"duration_ms":8,"result":"failure","destination":"remote:test"}}"#).unwrap();
         let checked = check_project(load_projects(&projects, &state).remove(0), &Client::new());
         let payload = serde_json::to_value(checked).unwrap();
@@ -826,10 +871,54 @@ mod tests {
         assert_eq!(payload["last_offsite"]["destination"], "remote:test");
         assert_eq!(payload["offsite_configured"], true);
         assert!(payload["last_backup"].get("secret").is_none());
-        fs::write(state.join("demo.json"), "{\"current\":null,\"previous\":null}").unwrap();
-        let old = serde_json::to_value(check_project(load_projects(&projects, &state).remove(0), &Client::new())).unwrap();
+        fs::write(
+            state.join("demo.json"),
+            "{\"current\":null,\"previous\":null}",
+        )
+        .unwrap();
+        let old = serde_json::to_value(check_project(
+            load_projects(&projects, &state).remove(0),
+            &Client::new(),
+        ))
+        .unwrap();
         assert!(old["last_backup"].is_null());
         assert!(old["last_offsite"].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_backup_records_are_not_reported_as_missing() {
+        let root = temp_dir("invalid-backups");
+        let projects = root.join("projects");
+        let state = root.join("state");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(
+            projects.join("demo.toml"),
+            "[backup]\noffsite_command = [\"copy\"]\n",
+        )
+        .unwrap();
+
+        for malformed in [
+            serde_json::json!({"result": "unknown-state", "started_at_unix": 123, "duration_ms": 7}),
+            serde_json::json!({"result": "success", "started_at_unix": 123, "duration_ms": 12.5}),
+            serde_json::json!({"result": "success", "started_at_unix": "yesterday", "duration_ms": 7}),
+        ] {
+            fs::write(
+                state.join("demo.json"),
+                serde_json::to_vec(
+                    &serde_json::json!({"last_backup": malformed, "last_offsite": malformed}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let checked = check_project(load_projects(&projects, &state).remove(0), &Client::new());
+            let payload = serde_json::to_value(checked).unwrap();
+            assert_eq!(payload["last_backup"]["result"], "invalid");
+            assert_eq!(payload["last_offsite"]["result"], "invalid");
+            assert_eq!(payload["offsite_configured"], true);
+            assert!(payload["last_backup"].get("started_at_unix").is_none());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -127,6 +127,29 @@ test('backup results remain separate and missing information is explicit', () =>
   assert.equal(byClass(facts, 'bad').length, 1)
 })
 
+test('unreadable records are visibly invalid, never missing or successful', () => {
+  const context = {
+    document: { querySelector: () => new Element(), createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}
+  }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = renderProject`, context)
+  const card = context.renderForTest({
+    name: 'demo', status: 'operational',
+    last_backup: { result: 'invalid' }, last_offsite: { result: 'invalid' },
+    offsite_configured: true
+  }, [])
+  const facts = byClass(card, 'backup-facts')[0]
+  assert.match(facts.textContent, /Local backupInvalid backup record/)
+  assert.match(facts.textContent, /Off-site copyInvalid backup record/)
+  assert.doesNotMatch(facts.textContent, /No backup recorded|No copy recorded/)
+  assert.equal(byClass(facts, 'bad').length, 2)
+  const unconfigured = context.renderForTest({
+    name: 'demo', status: 'operational', last_offsite: { result: 'invalid' },
+    offsite_configured: false
+  }, [])
+  assert.match(byClass(unconfigured, 'backup-facts')[0].textContent, /Off-site copyInvalid backup record/)
+})
+
 test('stopped worker degrades only its service and summary, not the host', () => {
   const elements = dashboard()
   const cards = byClass(elements.projects, 'service-card')
