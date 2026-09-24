@@ -271,13 +271,41 @@ impl Project {
         Ok(())
     }
 
-    pub fn compose_logs(&self, tail: u32, follow: bool) -> Result<()> {
+    pub fn compose_logs(
+        &self,
+        tail: u32,
+        follow: bool,
+        service: Option<&str>,
+        since: Option<&str>,
+    ) -> Result<()> {
+        if let Some(service) = service {
+            if !self
+                .config
+                .compose
+                .services
+                .iter()
+                .any(|name| name == service)
+            {
+                return Err(YardError::Config(format!(
+                    "unknown service '{service}' for project '{}'; valid services: {}",
+                    self.name,
+                    self.config.compose.services.join(", ")
+                )));
+            }
+        }
         let mut args = self.compose_args();
         args.extend(["logs".to_owned(), "--tail".to_owned(), tail.to_string()]);
         if follow {
             args.push("--follow".to_owned());
         }
-        args.extend(self.config.compose.services.iter().cloned());
+        if let Some(since) = since {
+            args.extend(["--since".to_owned(), since.to_owned()]);
+        }
+        if let Some(service) = service {
+            args.push(service.to_owned());
+        } else {
+            args.extend(self.config.compose.services.iter().cloned());
+        }
         command::inherit("docker", &args, Some(&self.config.compose.directory), &[])
     }
 

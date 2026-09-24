@@ -78,10 +78,18 @@ fn run() -> Result<()> {
         Command::Logs {
             project,
             tail,
+            service,
+            since,
+            follow,
             no_follow,
         } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
-            project.compose_logs(tail, !no_follow)?;
+            project.compose_logs(
+                tail,
+                follow || !no_follow,
+                service.as_deref(),
+                since.as_deref(),
+            )?;
         }
         Command::Backup { project } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;

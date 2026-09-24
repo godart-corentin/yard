@@ -47,13 +47,25 @@ pub enum Command {
         revision: Option<String>,
     },
 
-    /// Follow application logs.
+    /// Show application logs (following them by default).
     Logs {
         project: String,
 
         /// Number of existing log lines to show first.
         #[arg(long, default_value_t = 200)]
         tail: u32,
+
+        /// Show logs for only this configured Compose service.
+        #[arg(long)]
+        service: Option<String>,
+
+        /// Show logs since this duration or timestamp (Docker Compose format).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Follow new log lines (already the default; conflicts with --no-follow).
+        #[arg(long, conflicts_with = "no_follow")]
+        follow: bool,
 
         /// Print logs and exit instead of following them.
         #[arg(long)]
