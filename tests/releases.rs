@@ -109,6 +109,22 @@ impl Fixture {
     }
 
     fn run(&self, command: &str) -> Output {
+        if command == "rollback" {
+            let state = self.state();
+            let release = if state["pending"].is_null() && !state["previous"].is_null() {
+                &state["previous"]
+            } else if !state["current"].is_null() {
+                &state["current"]
+            } else {
+                &state["previous"]
+            };
+            let target = format!("release:{}", release["tag"].as_str().unwrap());
+            return self.run_with_args(command, &[&target, "--yes"]);
+        }
+        self.run_with_args(command, &[])
+    }
+
+    fn run_with_args(&self, command: &str, extra: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_yard"))
             .args([
                 "--projects-dir",
@@ -118,6 +134,7 @@ impl Fixture {
                 command,
                 "demo",
             ])
+            .args(extra)
             .env(
                 "PATH",
                 format!(
@@ -261,6 +278,136 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).unwrap();
     }
+}
+
+#[test]
+fn explicit_restore_guards_and_preserves_state() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let backup = fixture.root.join("bin/backup-sentinel");
+    fs::write(&backup, "#!/bin/sh\ntouch \"$FAKE_ROOT/backup-ran\"\n").unwrap();
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest = fixture.root.join("projects/demo.toml");
+    let contents = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        format!(
+            "{contents}\n[backup]\ncommand = [\"{}\"]\n",
+            backup.display()
+        ),
+    )
+    .unwrap();
+    assert!(fixture.run("deploy").status.success());
+    fs::remove_file(fixture.root.join("backup-ran")).unwrap();
+    let before = fixture.state();
+    let revision = format!("release:{}", before["previous"]["tag"].as_str().unwrap());
+    assert!(!fixture.run("restore").status.success());
+    assert!(!fixture
+        .run_with_args("rollback", &["--yes"])
+        .status
+        .success());
+    assert!(!fixture
+        .run_with_args("restore", &[&revision])
+        .status
+        .success());
+    assert!(!fixture
+        .run_with_args("restore", &["backup:local", "--yes"])
+        .status
+        .success());
+    assert_eq!(fixture.state(), before);
+    let result = fixture.run_with_args("restore", &[&revision, "--yes"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let state = fixture.state();
+    assert_eq!(state["current"]["revision"], before["previous"]["revision"]);
+    assert_eq!(
+        state["current"]["deployed_at_unix"],
+        before["previous"]["deployed_at_unix"]
+    );
+    assert_eq!(state["previous"]["revision"], before["current"]["revision"]);
+    assert!(state["pending"].is_null());
+    let snapshots: Vec<_> = fs::read_dir(fixture.root.join("state"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".restore-")
+        })
+        .collect();
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots
+        .iter()
+        .all(|path| fs::metadata(path).unwrap().permissions().mode() & 0o777 == 0o600));
+    assert!(snapshots
+        .iter()
+        .any(|path| fs::read_to_string(path)
+            .ok()
+            .is_some_and(|text| serde_json::from_str::<serde_json::Value>(&text).ok()
+                == Some(before.clone()))));
+    let audit = fs::read_to_string(fixture.root.join("state/demo.restore.jsonl")).unwrap();
+    assert_eq!(audit.lines().count(), 10);
+    assert!(audit.contains("Data backups cannot"));
+    assert!(audit.contains("success"));
+    assert!(
+        !fixture.root.join("backup-ran").exists(),
+        "restore must not invoke the configured backup command"
+    );
+    assert!(!fs::read_to_string(fixture.root.join("docker.log"))
+        .unwrap()
+        .contains(" run --rm "));
+    let log = fixture.run("restore-log");
+    assert!(log.status.success());
+    assert_eq!(String::from_utf8_lossy(&log.stdout), audit);
+}
+
+#[test]
+fn restore_points_report_unreadable_backup_record() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        r#"{"current":null,"last_backup":{"result":"garbage"}}"#,
+    )
+    .unwrap();
+    let result = fixture.run("restore-points");
+    assert!(result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("unreadable"));
+}
+
+#[test]
+fn failed_restore_recovers_original_image_and_journals_failure() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    assert!(fixture.run("deploy").status.success());
+    fixture.next_revision();
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    let target = before["previous"]["tag"].as_str().unwrap();
+    fs::write(fixture.root.join("fail-step"), "up").unwrap();
+    fs::write(fixture.root.join("fail-service"), "api").unwrap();
+    fs::write(fixture.root.join("fail-tag"), target).unwrap();
+    let result = fixture.run_with_args("restore", &[&format!("release:{target}"), "--yes"]);
+    assert!(!result.status.success());
+    assert_eq!(fixture.state(), before);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join(".env"))
+            .unwrap()
+            .trim(),
+        format!("IMAGE_TAG={}", before["current"]["tag"].as_str().unwrap())
+    );
+    assert!(
+        fs::read_to_string(fixture.root.join("state/demo.restore.jsonl"))
+            .unwrap()
+            .contains("refused_or_failed")
+    );
 }
 
 #[test]

@@ -9,7 +9,9 @@ yard list
 yard status hello-api
 yard host
 yard deploy hello-api
-yard rollback hello-api
+yard restore-points hello-api
+yard restore hello-api release:abc123def456 --yes
+yard restore-log hello-api
 yard logs hello-api
 yard backup hello-api
 ```
@@ -157,7 +159,7 @@ For a release spanning multiple Compose services, use `services = ["api", "worke
 
 Secrets do **not** belong in Yard manifests. Keep them in the application's own protected environment or secret files.
 
-Yard records the latest local backup attempt and the separate off-site copy attempt in the project state. `yard status` and the Web dashboard show the outcome, start time, duration and configured destination. If `backup.directory` or `backup.offsite_destination` is omitted, the destination is unknown; Yard does not infer a file, size or file count from the command or existing files. Without a recorded run, both views say so explicitly. An off-site failure is recorded separately and makes the command fail (and stops deploy/rollback before activation), while the local attempt remains a success. An unsuccessful local backup skips the off-site command. Existing manifests need no changes.
+Yard records the latest local backup attempt and the separate off-site copy attempt in the project state. `yard status` and the Web dashboard show the outcome, start time, duration and configured destination. If `backup.directory` or `backup.offsite_destination` is omitted, the destination is unknown; Yard does not infer a file, size or file count from the command or existing files. Without a recorded run, both views say so explicitly. An off-site failure is recorded separately and makes the backup command fail (and stops deploy before activation), while the local attempt remains a success. An unsuccessful local backup skips the off-site command. Restore/rollback never invokes either backup command. Existing manifests need no changes.
 
 If a stored backup attempt has invalid fields, `yard status` rejects the state file; the Web API returns a sanitized `{"result":"invalid"}` record and the dashboard displays “Invalid backup record” instead of claiming no backup was recorded.
 
@@ -184,11 +186,10 @@ yard images --prune --yes
 # Deploy the configured branch
 yard deploy hello-api
 
-# Roll back to the previous deployment
-yard rollback hello-api
-
-# Roll back to a specific revision whose image already exists locally
-yard rollback hello-api <revision>
+# Inspect recorded releases and backup attempts, then restore a named application image
+yard restore-points hello-api
+yard restore hello-api release:abc123def456 --yes
+yard restore-log hello-api
 
 # Follow application logs
 yard logs hello-api
@@ -320,9 +321,9 @@ More detail is available in [`docs/web.md`](docs/web.md).
 10. wait for the configured HTTP health check;
 11. once all services are running and the configured HTTP health check passes, atomically record the active release (revision, service/image references, timestamp and status) and the previous release under `/var/lib/yard`.
 
-Build or migration failures leave the active release unchanged and report the running containers. If activation or the health check fails, Yard names the failing service (the configured HTTP check is associated with the first service), reports actual Compose containers, and attempts to restore the previous application images for *all* services. It never records a partially activated release as active. A pending release marker is written before changing the Compose tag and cleared only after a verified activation or restoration; `yard status` highlights pending work and image mismatches. After an interrupted/failed restoration, inspect `yard status` and run `yard rollback <project>` to restore the last recorded active release before attempting another deploy.
+Build or migration failures leave the active release unchanged and report the running containers. If activation or the health check fails, Yard names the failing service (the configured HTTP check is associated with the first service), reports actual Compose containers, and attempts to restore the previous application images for *all* services. It never records a partially activated release as active. A pending release marker is written before changing the Compose tag and cleared only after a verified activation or restoration; `yard status` highlights pending work and image mismatches. After an interrupted/failed restoration, inspect `yard status` and `yard restore-points <project>`, then explicitly choose the recorded application release with `yard restore <project> release:<tag> --yes` before attempting another deploy.
 
-Compose `.env` files that are symbolic links are now refused by `yard deploy` and `yard rollback` (a change from earlier versions, which followed the link). Replace the link with a regular file at the configured `[compose].directory` / `[compose].env_file` path before retrying; keep its permissions and contents protected. Yard also refuses to reuse the old predictable temporary file: for `env_file = ".env"` in `/srv/hello-api/deploy`, it is `/srv/hello-api/deploy/..env.yard.tmp` (two leading dots). A leftover from an earlier Yard version, or any other planted file or link at that path, must be inspected and removed **manually**; Yard never deletes a pre-existing path. For example:
+Compose `.env` files that are symbolic links are refused by `yard deploy` and `yard restore` (including the `rollback` alias). Replace the link with a regular file at the configured `[compose].directory` / `[compose].env_file` path before retrying; keep its permissions and contents protected. Yard also refuses to reuse the old predictable temporary file: for `env_file = ".env"` in `/srv/hello-api/deploy`, it is `/srv/hello-api/deploy/..env.yard.tmp` (two leading dots). A leftover from an earlier Yard version, or any other planted file or link at that path, must be inspected and removed **manually**; Yard never deletes a pre-existing path. For example:
 
 ```bash
 ls -ld -- /srv/hello-api/deploy/..env.yard.tmp
@@ -330,23 +331,29 @@ ls -ld -- /srv/hello-api/deploy/..env.yard.tmp
 rm -- /srv/hello-api/deploy/..env.yard.tmp
 ```
 
-After a refusal, read the exact path and reason in the error, inspect `yard status <project>` and the path, then correct the `.env` link or remove the confirmed obsolete temporary file. A refusal detected before activation leaves no new `pending` marker; retry `yard deploy <project>` once the obstruction is gone. If `yard status` already reports a `pending` release from an interrupted run, remove the obstruction first, run `yard rollback <project>` to recover the last active release, check status, and only then retry deploy. Do not edit the state JSON by hand.
+After a refusal, read the exact path and reason in the error, inspect `yard status <project>` and the path, then correct the `.env` link or remove the confirmed obsolete temporary file. A refusal detected before activation leaves no new `pending` marker; retry `yard deploy <project>` once the obstruction is gone. If `yard status` already reports a `pending` release from an interrupted run, remove the obstruction first, explicitly choose the recorded active image with `yard restore <project> release:<tag> --yes`, check status, and only then retry deploy. Do not edit the state JSON by hand.
 
 Database rollback is deliberately separate. Yard never restores a database automatically just because an application image was rolled back.
 
 Yard treats long-lived dependencies such as databases as already-provisioned infrastructure. A migration service may start the dependencies it needs, but release activation itself uses `docker compose up --no-deps` so a routine application deploy does not unexpectedly recreate PostgreSQL, Redis, or other persistent services.
 
-## Rollback model
+## Explicit application recovery
 
-`yard rollback <project>` selects the previous release recorded by Yard (or the last active release when recovering an interrupted activation), runs the project's backup command, switches the Compose image tag, starts every listed service and waits for the existing HTTP health check. All target images must already exist locally.
+`yard restore-points <project>` lists the recorded current, previous and pending releases, plus the latest local and off-site backup attempts, with timestamps, age, outcome and destination. Malformed individual records are marked `unreadable`, not `absent`. Backup records are metadata, **not restorable database targets**. Only recorded releases are listed; Yard does not claim to enumerate all historical images.
 
-A specific Git revision can also be supplied:
+Select a release by the displayed `release:<tag>` identifier (or a Git revision when unambiguous), then explicitly confirm:
 
 ```bash
-yard rollback hello-api a1b2c3d4
+yard restore-points hello-api
+yard restore hello-api release:abc123def456 --yes
+yard restore-log hello-api
 ```
 
-Yard intentionally requires the corresponding image to already exist locally. Rebuilding arbitrary historical releases is a separate concern and avoids silently changing the source checkout during an emergency rollback.
+`yard rollback` is an alias with the **same required target and `--yes`**; neither command has an implicit “previous” action. A revision not recorded in Yard state is resolved through Git, but its already-built images must exist locally. No rebuild, migration or automatic data restore is performed. Before changing the image tag or project state, Yard stores timestamped private copies of the state JSON and Compose `.env` in the state directory (`<project>.restore-<timestamp>.json` and `.env`, mode `0600`). It writes a pending marker before activation and verifies running services and health before recording the target as current. On activation failure it tries to reactivate the original image; if recovery also fails the pending marker remains and the error names the snapshot for manual inspection. Every attempted restore, including refusals, is appended to `<project>.restore.jsonl` and viewable via `yard restore-log`.
+
+### Manual data recovery
+
+`yard restore <project> backup:local --yes` (also `backup:offsite`) is **always refused**. A backup destination shown by Yard is descriptive, not a verified restorable archive. For database recovery, inspect the backup and destination manually, stop all writers, follow the database engine's documented restore procedure *outside Yard* with a separately verified recovery plan, validate the recovered data, then restart application services. Never equate an application image rollback with a database rollback. Yard's restore command invokes neither configured backup commands nor migrations and never restores a database or volume.
 
 ## State
 
@@ -356,7 +363,7 @@ Deployment state is stored as JSON under:
 /var/lib/yard/<project>.json
 ```
 
-The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or rollback uses that release. Writes remain atomic; new state files are mode `0600` and updates preserve the existing mode. Application secrets remain outside Yard.
+The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or restore uses that release. Writes remain atomic; new state files are mode `0600` and updates preserve the existing mode. Restore snapshots of Compose `.env` may contain application secrets: protect the state directory and its `0600` snapshots accordingly.
 
 ## Security
 

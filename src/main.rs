@@ -9,7 +9,7 @@ mod health;
 mod host;
 mod images;
 mod project;
-mod rollback;
+mod restore;
 mod service_health;
 mod state;
 mod status;
@@ -75,9 +75,26 @@ fn run() -> Result<()> {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
             deploy::run(&project)?;
         }
-        Command::Rollback { project, revision } => {
+        Command::Rollback {
+            project,
+            revision,
+            yes,
+        }
+        | Command::Restore {
+            project,
+            revision,
+            yes,
+        } => {
             let project = Project::load(&project, &projects_dir, &state_dir)?;
-            rollback::run(&project, revision.as_deref())?;
+            restore::run(&project, revision.as_deref(), yes)?;
+        }
+        Command::RestorePoints { project } => {
+            let project = Project::load(&project, &projects_dir, &state_dir)?;
+            restore::points(&project)?;
+        }
+        Command::RestoreLog { project } => {
+            let project = Project::load(&project, &projects_dir, &state_dir)?;
+            restore::log(&project)?;
         }
         Command::Logs {
             project,

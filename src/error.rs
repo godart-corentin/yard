@@ -37,9 +37,6 @@ pub enum YardError {
     #[error("health check failed for {0}")]
     HealthCheck(String),
 
-    #[error("no previous deployment is recorded for {0}")]
-    NoPreviousRelease(String),
-
     #[error("image is not available locally: {0}")]
     ImageMissing(String),
 
