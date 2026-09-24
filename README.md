@@ -193,11 +193,19 @@ yard logs hello-api
 # Show the last 50 lines without following
 yard logs hello-api --tail 50 --no-follow
 
+# Follow only the api service's logs from the last two hours
+yard logs hello-api --service api --since 2h --follow
+
+# Show only the worker service's logs since a specific timestamp
+yard logs hello-api --service worker --since 2026-09-24T08:00:00Z --no-follow
+
 # Run the configured backup command
 yard backup hello-api
 ```
 
 Image cleanup is CLI-only and never scheduled. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
+
+`logs` follows by default (`--follow` is explicit; `--no-follow` exits after printing). Without `--service`, it includes all services configured for the project. `--service` must exactly match a configured Compose service; an unknown name reports the valid services. `--since` accepts a duration or timestamp understood by Docker Compose and is passed through unchanged.
 
 For development and tests, the system directories can be overridden:
 
