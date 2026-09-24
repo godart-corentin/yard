@@ -108,6 +108,26 @@ test('each container appears only within its own service, with its state', () =>
   assert.equal(byClass(elements['host-metrics'], 'container-row').length, 0)
 })
 
+test('successful one-shot migration is completed without degrading its project', () => {
+  const elements = dashboard()
+  const completed = structuredClone(payload)
+  completed.host.snapshot.containers = [
+    { project: 'hello-api', service: 'api', state: 'running', status: 'normal' },
+    { project: 'hello-api', service: 'migrate', state: 'exited', status: 'normal' }
+  ]
+  const context = {
+    document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL
+  }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = render`, context)
+  context.renderForTest(completed)
+  const card = byClass(elements.projects, 'service-card')[0]
+  assert.equal(byClass(card, 'service-header')[0].children[1].textContent, 'Operational')
+  const migration = byClass(card, 'container-row')[1]
+  assert.deepEqual(migration.children.map(child => child.textContent), ['migrate', 'Completed', 'Completed'])
+  assert.match(migration.children[2].className, /operational/)
+})
+
 test('backup results remain separate and missing information is explicit', () => {
   const cards = byClass(dashboard().projects, 'service-card')
   const first = byClass(cards[0], 'backup-facts')[0]
@@ -189,4 +209,26 @@ test('probes stay with their project card and display real measurements', () => 
   assert.match(probes[1].textContent, /worker.*Unhealthy.*94 s/)
   assert.equal(byClass(cards[1], 'service-probe').length, 0)
   assert.equal(elements['host-badge'].textContent, 'Normal')
+})
+
+test('unconfigured service probe does not create a Service health section', () => {
+  const elements = dashboard()
+  const withoutProbe = structuredClone(payload)
+  withoutProbe.projects[0].services = [{
+    service: 'api', status: 'unknown', kind: null,
+    message: 'No service probe configured'
+  }]
+  withoutProbe.host.snapshot.containers = [
+    { project: 'hello-api', service: 'api', state: 'running', status: 'normal' }
+  ]
+  const context = {
+    document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL
+  }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = render`, context)
+  context.renderForTest(withoutProbe)
+  const card = byClass(elements.projects, 'service-card')[0]
+  assert.equal(byClass(card, 'service-probe').length, 0)
+  assert.equal(byClass(card, 'container-row').length, 1)
+  assert.equal(byClass(card, 'service-header')[0].children[1].textContent, 'Operational')
 })

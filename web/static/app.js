@@ -243,13 +243,16 @@ const renderProject = (project, containers) => {
 
   card.append(header, endpoints, facts, releaseBlock)
 
-  if (Array.isArray(project.services) && project.services.length) {
+  const probes = Array.isArray(project.services)
+    ? project.services.filter(probe => probe.message !== 'No service probe configured')
+    : []
+  if (probes.length) {
     const group = document.createElement('div')
     group.className = 'service-containers'
     const label = document.createElement('h3')
     label.textContent = 'Service health'
     group.append(label)
-    for (const probe of project.services) {
+    for (const probe of probes) {
       const row = document.createElement('div')
       row.className = 'container-row service-probe'
       const name = document.createElement('strong')
@@ -290,8 +293,11 @@ const renderProject = (project, containers) => {
       containerName.textContent = container.service
       const state = document.createElement('span')
       state.className = 'container-state'
-      state.textContent = container.status === 'critical' ? 'Stopped' : container.state
-      row.append(containerName, state, statusBadge(container.status === 'critical' ? 'down' : 'operational'))
+      const completed = container.state === 'exited' && container.status === 'normal'
+      state.textContent = completed ? 'Completed' : container.status === 'critical' ? 'Stopped' : container.state
+      const badge = statusBadge(container.status === 'critical' ? 'down' : 'operational')
+      if (completed) badge.textContent = 'Completed'
+      row.append(containerName, state, badge)
       group.append(row)
     }
     card.append(group)

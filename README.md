@@ -112,6 +112,11 @@ Projects are defined as TOML files in:
 /etc/yard/projects/*.toml
 ```
 
+For a service monitored by URL but not deployed by Yard, a manifest may contain
+only `[deployment]` and `health_url`. `yard status` checks that URL and reports
+the HTTP result; no Git repository, Compose file, or release state is needed.
+Deployment commands require the full manifest below.
+
 A generic example is included at [`examples/hello-api.toml`](examples/hello-api.toml):
 
 ```toml
@@ -207,7 +212,7 @@ yard logs hello-api --service worker --since 2026-09-24T08:00:00Z --no-follow
 yard backup hello-api
 ```
 
-`yard status` (without a project) prints one summary line per configured project, including recorded releases, deployment and backup timestamps, service probes, checkout disk usage and alerts for stopped/missing containers or image drift. `yard status <project>` keeps its existing Git, release, backup, Compose and host sections and adds detailed probe measurements and timestamps. Disk (repo) counts allocated bytes in the local checkout only: Docker volumes, backup files outside the checkout and remote copies are not attributed to a project. An unreadable state is reported as an alert, never as a missing deployment.
+`yard status` (without a project) prints one summary line per configured project, including recorded releases, deployment and backup timestamps, service probes, checkout disk usage and alerts for stopped/missing containers or application image drift. A configured migration service that exited successfully is expected. Data services are monitored for stopped containers but their images are not compared with application releases. `yard status <project>` keeps its existing Git, release, backup, Compose and host sections and adds detailed probe measurements and timestamps. Disk (repo) counts allocated bytes in the local checkout only: Docker volumes, backup files outside the checkout and remote copies are not attributed to a project. An unreadable state is reported as an alert, never as a missing deployment.
 
 Image cleanup is CLI-only and never scheduled. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
 

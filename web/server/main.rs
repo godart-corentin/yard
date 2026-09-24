@@ -551,6 +551,7 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
         services: project
             .service_names
             .into_iter()
+            .filter(|_| project.has_service_probes)
             .map(|service| ServiceHealth {
                 project: project.name.clone(),
                 service,
@@ -659,6 +660,10 @@ fn apply_service_snapshot(payload: &mut StatusPayload) {
         None
     };
     for project in &mut payload.projects {
+        if !project.uses_service_probes {
+            project.services.clear();
+            continue;
+        }
         let measured: Vec<_> = fresh
             .unwrap_or(&[])
             .iter()
@@ -675,9 +680,6 @@ fn apply_service_snapshot(payload: &mut StatusPayload) {
                 service.age_seconds = None;
                 service.message = Some("Service snapshot unavailable".to_owned());
             }
-        }
-        if !project.uses_service_probes {
-            continue;
         }
         project.status = service_project_status(&project.services).to_owned();
         project.error = if !available {
@@ -1144,6 +1146,61 @@ mod tests {
         );
         assert_eq!(checked.status, "unknown");
         assert!(checked.error.unwrap().contains("No deployment.health_url"));
+    }
+
+    #[test]
+    fn project_without_probes_has_no_service_rows_even_with_a_snapshot() {
+        let client = Client::builder().build().unwrap();
+        let checked = check_project(
+            Project {
+                name: "demo".to_owned(),
+                health_url: None,
+                has_service_probes: false,
+                service_names: vec!["api".to_owned()],
+                release: None,
+                pending_release: None,
+                last_backup: None,
+                last_offsite: None,
+                offsite_configured: Some(false),
+                config_error: None,
+            },
+            &client,
+        );
+        assert!(checked.services.is_empty());
+
+        let dir = temp_dir("no-probes");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut snapshot: Value = serde_json::from_str(VALID_HOST).unwrap();
+        snapshot["collected_at_unix"] = serde_json::json!(now);
+        snapshot["services"] = serde_json::json!([{
+            "project": "demo", "service": "api", "status": "unknown",
+            "kind": null, "latency_ms": null, "age_seconds": null,
+            "message": "No service probe configured"
+        }]);
+        fs::write(
+            dir.join("host.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let mut payload = StatusPayload {
+            status: "operational".into(),
+            checked_at: String::new(),
+            projects: vec![ProjectStatus {
+                name: "demo".into(),
+                ..project("operational")
+            }],
+            host: load_host(&dir, now, 300),
+        };
+        apply_service_snapshot(&mut payload);
+        assert!(payload.projects[0].services.is_empty());
+        assert_eq!(payload.projects[0].status, "operational");
+        payload.host = load_host(&dir, now + 301, 300);
+        apply_service_snapshot(&mut payload);
+        assert!(payload.projects[0].services.is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
