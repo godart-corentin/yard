@@ -170,7 +170,7 @@ const renderProject = (project) => {
 
   if (Array.isArray(release.services)) {
     const images = document.createElement('div')
-    images.className = 'release-services'
+    images.className = 'service-facts'
     for (const service of release.services) {
       addFact(images, service.name, service.image || '—')
     }

@@ -27,6 +27,8 @@ test('card shows each release image and warns about interrupted activation', () 
     document, fetch: () => new Promise(() => {}), setInterval: () => 0
   })
   const text = texts(card)
+  const images = card.children.find((child) => child.children.some((item) => item.children.some((value) => value.textContent === 'api:old')))
+  assert.equal(images.className, 'service-facts')
   assert.match(text, /api:old/)
   assert.match(text, /worker:old/)
   assert.match(text, /activating/)
