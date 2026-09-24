@@ -147,6 +147,16 @@ const addFact = (list, label, value, className = '') => {
   list.append(item)
 }
 
+const backupDetail = (attempt) => {
+  if (!attempt) return 'No backup recorded'
+  const date = toDate(attempt.started_at_unix, true)
+  const age = date ? `${Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000))}s ago` : 'time unavailable'
+  const result = attempt.result === 'success' ? 'Success' : attempt.result === 'failure' ? 'Failure' : 'Unknown result'
+  const destination = attempt.destination || 'unknown destination'
+  const duration = attempt.duration_ms == null ? '' : ` · ${attempt.duration_ms} ms`
+  return `${result} · ${age} · ${destination}${duration}`
+}
+
 const renderProject = (project, containers) => {
   const card = document.createElement('article')
   card.className = 'service-card'
@@ -253,6 +263,17 @@ const renderProject = (project, containers) => {
     }
     card.append(group)
   }
+
+  const backup = document.createElement('dl')
+  backup.className = 'service-facts backup-facts'
+  addFact(backup, 'Local backup', backupDetail(project.last_backup), project.last_backup?.result === 'failure' ? 'bad' : '')
+  const offsite = project.offsite_configured === false ? 'Not configured'
+    : project.offsite_configured === true
+      ? project.last_offsite ? backupDetail(project.last_offsite)
+        : 'No copy recorded for the last local backup'
+      : 'Configuration unavailable'
+  addFact(backup, 'Off-site copy', offsite, project.last_offsite?.result === 'failure' ? 'bad' : '')
+  card.append(backup)
 
   if (containers.length) {
     const group = document.createElement('div')

@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::command;
 use crate::config::ProjectConfig;
 use crate::envfile;
 use crate::error::{Result, YardError};
-use crate::state::{Release, ReleaseService};
+use crate::state::{BackupAttempt, BackupResult, ProjectState, Release, ReleaseService};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -281,54 +281,62 @@ impl Project {
         command::inherit("docker", &args, Some(&self.config.compose.directory), &[])
     }
 
-    pub fn run_backup(&self) -> Result<()> {
+    pub fn run_backup(&self, state: &mut ProjectState) -> Result<()> {
         let Some(backup) = &self.config.backup else {
             return Ok(());
         };
-        let (program, args) = backup
-            .command
-            .split_first()
-            .ok_or_else(|| YardError::Config("backup.command is empty".into()))?;
-        command::inherit(program, args, Some(&self.config.repo), &[])
+        // Clear the outcome of the previous run: a failed local attempt has no new off-site copy.
+        state.last_offsite = None;
+        let (started_at_unix, duration_ms, result) = self.backup_command(&backup.command);
+        state.last_backup = Some(BackupAttempt {
+            started_at_unix,
+            duration_ms,
+            result: if result.is_ok() {
+                BackupResult::Success
+            } else {
+                BackupResult::Failure
+            },
+            destination: backup
+                .directory
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        });
+        state.save(&self.state_path)?;
+        result?;
+
+        if let Some(offsite_command) = &backup.offsite_command {
+            let (started_at_unix, duration_ms, result) = self.backup_command(offsite_command);
+            state.last_offsite = Some(BackupAttempt {
+                started_at_unix,
+                duration_ms,
+                result: if result.is_ok() {
+                    BackupResult::Success
+                } else {
+                    BackupResult::Failure
+                },
+                destination: backup.offsite_destination.clone(),
+            });
+            state.save(&self.state_path)?;
+            result.map_err(|error| {
+                YardError::Config(format!(
+                    "off-site copy failed (local backup succeeded): {error}"
+                ))
+            })?;
+        }
+        Ok(())
     }
 
-    pub fn last_backup(&self) -> Result<Option<(PathBuf, SystemTime)>> {
-        let Some(backup) = &self.config.backup else {
-            return Ok(None);
+    fn backup_command(&self, command_line: &[String]) -> (u64, u128, Result<()>) {
+        let started_at_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let start = Instant::now();
+        let result = match command_line.split_first() {
+            Some((program, args)) => command::inherit(program, args, Some(&self.config.repo), &[]),
+            None => Err(YardError::Config("backup command is empty".into())),
         };
-        let Some(directory) = &backup.directory else {
-            return Ok(None);
-        };
-
-        let extension = backup
-            .extension
-            .as_deref()
-            .map(|value| value.trim_start_matches('.'));
-        let mut latest: Option<(PathBuf, SystemTime)> = None;
-
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            let metadata = entry.metadata()?;
-            if !metadata.is_file() {
-                continue;
-            }
-            if let Some(extension) = extension {
-                if path.extension().and_then(|value| value.to_str()) != Some(extension) {
-                    continue;
-                }
-            }
-
-            let modified = metadata.modified()?;
-            let should_replace = latest
-                .as_ref()
-                .map_or(true, |(_, current)| modified > *current);
-            if should_replace {
-                latest = Some((path, modified));
-            }
-        }
-
-        Ok(latest)
+        (started_at_unix, start.elapsed().as_millis(), result)
     }
 
     fn git_checked(&self, args: &[&str]) -> Result<String> {

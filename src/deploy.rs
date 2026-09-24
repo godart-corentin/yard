@@ -28,7 +28,7 @@ pub fn run(project: &Project) -> Result<()> {
     project.update_branch()?;
     println!("✓ Git update");
 
-    project.run_backup()?;
+    project.run_backup(&mut state)?;
     println!("✓ Backup");
 
     let new_revision = project.head_revision()?;

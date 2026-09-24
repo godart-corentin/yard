@@ -264,6 +264,169 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn backup_records_local_and_offsite_outcomes_independently() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let manifest = fixture.root.join("projects/demo.toml");
+    let original = fs::read_to_string(&manifest).unwrap();
+    let local = fixture.root.join("bin/local-backup");
+    let offsite = fixture.root.join("bin/offsite-backup");
+    fs::write(&local, "#!/bin/sh\ntest ! -f \"$FAKE_ROOT/fail-local\"\n").unwrap();
+    fs::write(
+        &offsite,
+        "#!/bin/sh\ntouch \"$FAKE_ROOT/offsite-ran\"\ntest ! -f \"$FAKE_ROOT/fail-offsite\"\n",
+    )
+    .unwrap();
+    for script in [&local, &offsite] {
+        fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let backup = format!("\n[backup]\ncommand = [\"{}\"]\ndirectory = \"{}\"\noffsite_command = [\"{}\"]\noffsite_destination = \"remote:test\"\n", local.display(), fixture.root.join("archives").display(), offsite.display());
+    fs::write(&manifest, format!("{original}{backup}")).unwrap();
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let elapsed = std::time::Instant::now();
+    let result = fixture.run("backup");
+    let wall_ms = elapsed.elapsed().as_millis();
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let state = fixture.state();
+    assert_eq!(state["last_backup"]["result"], "success");
+    assert_eq!(
+        state["last_backup"]["destination"],
+        fixture.root.join("archives").to_string_lossy().as_ref()
+    );
+    let started = state["last_backup"]["started_at_unix"].as_u64().unwrap();
+    assert!((before..=after).contains(&started));
+    assert!(state["last_backup"]["duration_ms"].as_u64().unwrap() as u128 <= wall_ms);
+    assert!(state["last_backup"].get("size_bytes").is_none());
+    assert_eq!(state["last_offsite"]["result"], "success");
+    assert_eq!(state["last_offsite"]["destination"], "remote:test");
+
+    fs::write(fixture.root.join("fail-offsite"), "").unwrap();
+    let result = fixture.run("backup");
+    assert!(!result.status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "success");
+    assert_eq!(fixture.state()["last_offsite"]["result"], "failure");
+    let status = String::from_utf8_lossy(&fixture.run("status").stdout).into_owned();
+    assert!(status.contains("Local: success"), "{status}");
+    assert!(status.contains("Off-site: failure"), "{status}");
+
+    fs::remove_file(fixture.root.join("fail-offsite")).unwrap();
+    fs::remove_file(fixture.root.join("offsite-ran")).unwrap();
+    fs::write(fixture.root.join("fail-local"), "").unwrap();
+    let result = fixture.run("backup");
+    assert!(!result.status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "failure");
+    assert!(fixture.state()["last_offsite"].is_null());
+    assert!(!fixture.root.join("offsite-ran").exists());
+    let status = String::from_utf8_lossy(&fixture.run("status").stdout).into_owned();
+    assert!(status.contains("Local: failure"), "{status}");
+    assert!(status.contains("no copy recorded"), "{status}");
+
+    fs::remove_file(fixture.root.join("fail-local")).unwrap();
+    assert!(fixture.run("backup").status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "success");
+    assert_eq!(fixture.state()["last_offsite"]["result"], "success");
+
+    fs::remove_file(local).unwrap();
+    assert!(!fixture.run("backup").status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "failure");
+    assert!(fixture.state()["last_offsite"].is_null());
+}
+
+#[test]
+fn backup_without_offsite_survives_deploy_and_rollback_state_writes() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let manifest = fixture.root.join("projects/demo.toml");
+    let original = fs::read_to_string(&manifest).unwrap();
+    let local = fixture.root.join("bin/local-backup");
+    fs::write(&local, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&local, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        &manifest,
+        format!(
+            "{original}\n[backup]\ncommand = [\"{}\"]\n",
+            local.display()
+        ),
+    )
+    .unwrap();
+    assert!(fixture.run("backup").status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "success");
+    assert!(fixture.state()["last_offsite"].is_null());
+    let status = String::from_utf8_lossy(&fixture.run("status").stdout).into_owned();
+    assert!(status.contains("Off-site: not configured"), "{status}");
+    assert!(status.contains("unknown destination"), "{status}");
+    assert!(fixture.run("deploy").status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "success");
+    assert!(fixture.run("rollback").status.success());
+    assert_eq!(fixture.state()["last_backup"]["result"], "success");
+}
+
+#[test]
+fn failed_offsite_copy_stops_deploy_without_marking_local_backup_failed() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    let manifest = fixture.root.join("projects/demo.toml");
+    let original = fs::read_to_string(&manifest).unwrap();
+    let local = fixture.root.join("bin/local-backup");
+    let offsite = fixture.root.join("bin/offsite-backup");
+    fs::write(&local, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&offsite, "#!/bin/sh\nexit 9\n").unwrap();
+    for script in [&local, &offsite] {
+        fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::write(
+        &manifest,
+        format!(
+            "{original}\n[backup]\ncommand = [\"{}\"]\noffsite_command = [\"{}\"]\n",
+            local.display(),
+            offsite.display()
+        ),
+    )
+    .unwrap();
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("off-site copy failed (local backup succeeded)"));
+    let state = fixture.state();
+    assert_eq!(state["last_backup"]["result"], "success");
+    assert_eq!(state["last_offsite"]["result"], "failure");
+    assert!(state["pending"].is_null());
+    assert!(state["current"].is_null());
+}
+
+#[test]
+fn legacy_state_and_unconfigured_offsite_remain_explicit() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("service = \"api\"");
+    fs::write(
+        fixture.root.join("state/demo.json"),
+        "{\"current\":null,\"previous\":null}\n",
+    )
+    .unwrap();
+    let status = fixture.run("status");
+    assert!(status.status.success());
+    let output = String::from_utf8_lossy(&status.stdout);
+    assert!(output.contains("No backup recorded"), "{output}");
+    assert!(output.contains("Off-site: not configured"), "{output}");
+}
+
+#[test]
 fn rejects_simultaneous_legacy_and_multi_service_keys() {
     let fixture = Fixture::new();
     fixture.manifest("service = \"api\"\nservices = [\"api\", \"worker\"]");
