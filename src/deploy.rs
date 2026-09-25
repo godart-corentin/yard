@@ -106,7 +106,7 @@ pub fn run(project: &Project) -> Result<()> {
     state.save(&project.state_path)?;
 
     project.persist_tag(&new_tag)?;
-    let activation = project.activate(&new_release);
+    let activation = project.activate(&new_release, true);
 
     if let Err(error) = activation {
         warn!(project = %project.name, %error, "deployment failed; restoring previous application image");
@@ -114,7 +114,7 @@ pub fn run(project: &Project) -> Result<()> {
         let restore = (|| -> Result<()> {
             project.persist_tag(&old_tag)?;
             if let Some(old) = &old_release {
-                project.activate(old)?;
+                project.activate(old, false)?;
             }
             Ok(())
         })();

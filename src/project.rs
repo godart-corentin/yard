@@ -257,7 +257,7 @@ impl Project {
         Ok((matched, details.join("; ")))
     }
 
-    pub fn activate(&self, release: &Release) -> Result<()> {
+    pub fn activate(&self, release: &Release, enforce_deployment_gates: bool) -> Result<()> {
         for service in &release.services {
             self.compose_up(&release.tag, &service.name)
                 .map_err(|source| YardError::Service {
@@ -265,6 +265,10 @@ impl Project {
                     source: Box::new(source),
                 })?;
         }
+        let floor_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         crate::health::wait(&self.config.deployment).map_err(|source| YardError::Service {
             service: self.config.compose.services[0].clone(),
             source: Box::new(source),
@@ -274,6 +278,9 @@ impl Project {
             return Err(YardError::Config(format!(
                 "release does not match Docker Compose: {report}"
             )));
+        }
+        if enforce_deployment_gates {
+            crate::service_health::wait_for_deployment_gates(self, floor_unix)?;
         }
         Ok(())
     }

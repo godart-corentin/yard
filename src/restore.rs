@@ -267,7 +267,8 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
     state.save(&project.state_path)?;
     let activation = (|| -> Result<()> {
         project.persist_tag(&release.tag)?;
-        project.activate(&release)
+        // Restore is an emergency path: never gate the return to an earlier image.
+        project.activate(&release, false)
     })();
     if let Err(error) = activation {
         eprintln!(
@@ -276,7 +277,7 @@ fn attempt(project: &Project, target: Option<&str>, yes: bool) -> Result<()> {
         );
         let recovery = (|| -> Result<()> {
             project.persist_tag(&current.tag)?;
-            project.activate(&current)?;
+            project.activate(&current, false)?;
             state.pending = None;
             if state.current.is_none() {
                 current.status = "active".into();

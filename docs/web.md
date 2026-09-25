@@ -25,6 +25,18 @@ the worker needs only `touch` and `stat` in the container. A missing, unreadable
 future-dated or stopped source can never be Healthy. Keep the file on the
 container's ephemeral filesystem, not a persistent volume. No Docker socket or
 worker filesystem is exposed to Web. No broker, agent or new dependency is needed.
+Probes are informational by default (`deployment_gate = false`). Set
+`deployment_gate = true` on either probe type to block a new release until all
+gated services are Healthy, after Compose startup and image verification.
+Unknown, Degraded and Unhealthy do not pass; a missing heartbeat is retried
+until the configured timeout, not failed immediately. Set positive
+`[deployment] gate_attempts` (default 30) and `gate_interval_seconds` (default 2)
+to control the attempts and spacing. A heartbeat predating completion of the
+new release's Compose startup never counts, even if its age is within the
+configured limit. Timeout fails deployment and triggers application-image
+rollback. Manual `yard restore` bypasses these gates for emergency recovery;
+the separate `deployment.health_url` check is unchanged. Web only displays
+the existing probe states; it does not run the deployment gate.
 An undeclared service probe is explicitly Unknown in the CLI and host snapshot;
 the dashboard hides its unconfigured probe row.
 

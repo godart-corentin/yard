@@ -1,14 +1,16 @@
 //! CLI-only service probes. The Web process only consumes the sanitized host snapshot.
 use std::env;
-
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
 use serde::Serialize;
+use tracing::debug;
 
 use crate::command;
 use crate::config::ServiceProbe;
-use crate::host::Container;
+use crate::error::{Result, YardError};
+use crate::host::{parse_containers, Container};
 use crate::project::Project;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -126,7 +128,9 @@ pub fn collect(
                 return result;
             }
             match probe {
-                ServiceProbe::Http { url, timeout_ms } => {
+                ServiceProbe::Http {
+                    url, timeout_ms, ..
+                } => {
                     let client = Client::builder()
                         .timeout(Duration::from_millis(*timeout_ms))
                         .redirect(reqwest::redirect::Policy::none())
@@ -156,6 +160,7 @@ pub fn collect(
                 ServiceProbe::Heartbeat {
                     path,
                     max_age_seconds,
+                    ..
                 } => {
                     result.max_age_seconds = Some(*max_age_seconds);
                     result.crit_multiplier = Some(thresholds.heartbeat_crit_multiplier);
@@ -198,6 +203,80 @@ pub fn collect(
             result
         })
         .collect()
+}
+
+pub fn wait_for_deployment_gates(project: &Project, floor_unix: u64) -> Result<()> {
+    let gated: Vec<_> = project
+        .config
+        .service_health
+        .iter()
+        .filter(|(_, probe)| match probe {
+            ServiceProbe::Http {
+                deployment_gate, ..
+            }
+            | ServiceProbe::Heartbeat {
+                deployment_gate, ..
+            } => *deployment_gate,
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if gated.is_empty() {
+        return Ok(());
+    }
+
+    let deployment = &project.config.deployment;
+    for attempt in 0..deployment.gate_attempts {
+        if attempt > 0 {
+            thread::sleep(Duration::from_secs(deployment.gate_interval_seconds));
+        }
+        let containers = project.compose_ps().ok().and_then(|output| {
+            parse_containers(
+                &project.name,
+                deployment.migration_service.as_deref(),
+                &output,
+            )
+        });
+        let blocking: Vec<_> = collect(project, containers.as_deref(), Thresholds::from_env())
+            .into_iter()
+            .filter(|service| gated.contains(&service.service.as_str()))
+            .filter_map(|service| {
+                let before_release = service.kind == Some("heartbeat")
+                    && service
+                        .heartbeat_at_unix
+                        .is_some_and(|stamp| stamp < floor_unix);
+                if service.status == Health::Healthy && !before_release {
+                    return None;
+                }
+                let status = if before_release {
+                    Health::Unknown
+                } else {
+                    service.status
+                };
+                let message = if before_release {
+                    Some("Heartbeat predates the release")
+                } else {
+                    service.message
+                };
+                Some(format!(
+                    "{}: {status:?} ({})",
+                    service.service,
+                    message.unwrap_or("outside healthy thresholds")
+                ))
+            })
+            .collect();
+        debug!(
+            attempt = attempt + 1,
+            ?blocking,
+            "checking deployment gates"
+        );
+        if blocking.is_empty() {
+            return Ok(());
+        }
+        if attempt + 1 == deployment.gate_attempts {
+            return Err(YardError::DeploymentGate(blocking.join("; ")));
+        }
+    }
+    unreachable!("gate_attempts is validated as positive")
 }
 
 pub fn render(services: &[ServiceHealth]) -> String {

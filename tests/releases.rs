@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,6 +68,12 @@ impl Fixture {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         count.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(log) = fs::read(root.join("docker.log")) {
+                            fs::write(root.join("http-observed-docker.log"), log).unwrap();
+                        }
+                        if let Ok(state) = fs::read(root.join("state/demo.json")) {
+                            fs::write(root.join("http-observed-state.json"), state).unwrap();
+                        }
                         let healthy = healthy_image.as_ref().map_or(true, |image| {
                             fs::read_to_string(root.join("running-api"))
                                 .is_ok_and(|running| running.trim() == image)
@@ -104,6 +110,15 @@ impl Fixture {
         manifest.push_str(&format!(
             "[deployment]\nhealth_url = \"{}\"\nhealth_attempts = 1\nhealth_interval_seconds = 1\n",
             server.url
+        ));
+        fs::write(path, manifest).unwrap();
+    }
+
+    fn gate(&self, service: &str, probe: &str, attempts: u32) {
+        let path = self.root.join("projects/demo.toml");
+        let mut manifest = fs::read_to_string(&path).unwrap();
+        manifest.push_str(&format!(
+            "\n[deployment]\ngate_attempts = {attempts}\ngate_interval_seconds = 1\n\n[service_health.{service}]\n{probe}\ndeployment_gate = true\n"
         ));
         fs::write(path, manifest).unwrap();
     }
@@ -207,6 +222,14 @@ case " $* " in
         printf '{"Service":"%s","State":"running","Image":"%s"}\n' "$service" "$image"
       fi
     done ;;
+  *" exec -T worker stat -c %Y -- /run/yard/heartbeat "*)
+    cp "$FAKE_ROOT/state/demo.json" "$FAKE_ROOT/gate-observed-state" 2>/dev/null || true
+    if [ -f "$FAKE_ROOT/delay-heartbeat" ]; then
+      date +%s > "$FAKE_ROOT/heartbeat"
+      sleep 3
+    fi
+    test -r "$FAKE_ROOT/heartbeat" || exit 1
+    cat "$FAKE_ROOT/heartbeat" ;;
   *" build "*|*" up -d "*)
     for service in api worker; do
       case " $* " in
@@ -1030,6 +1053,280 @@ fn healthy_http_endpoint_activates_both_services() {
     let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
     assert!(log.contains("up -d --no-build --no-deps api"));
     assert!(log.contains("up -d --no-build --no-deps worker"));
+}
+
+#[test]
+fn gated_http_probe_activates_release_after_images_are_checked() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let server = fixture.health_server(None);
+    fixture.gate(
+        "api",
+        &format!("type = 'http'\nurl = '{}'\ntimeout_ms = 800", server.url),
+        2,
+    );
+    let result = fixture.run("deploy");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(server.requests.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.state()["current"]["status"], "active");
+    assert!(fixture.state()["pending"].is_null());
+    let log = fs::read_to_string(fixture.root.join("http-observed-docker.log")).unwrap();
+    assert!(log.contains("up -d --no-build --no-deps api"));
+    assert!(log.contains("up -d --no-build --no-deps worker"));
+    assert_eq!(log.matches("ps --all --format json").count(), 2);
+    let observed: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("http-observed-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(observed["pending"]["status"], "activating");
+}
+
+#[test]
+fn non_gating_heartbeat_does_not_delay_or_probe_deployment() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let path = fixture.root.join("projects/demo.toml");
+    let manifest = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{manifest}\n[service_health.worker]\ntype = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30\ndeployment_gate = false\n")).unwrap();
+    let result = fixture.run("deploy");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!fs::read_to_string(fixture.root.join("docker.log"))
+        .unwrap()
+        .contains("exec -T worker stat"));
+}
+
+#[test]
+fn gate_waits_for_missing_heartbeat_then_activates_without_clearing_pending_early() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    fixture.gate(
+        "worker",
+        "type = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30",
+        4,
+    );
+    let root = fixture.root.clone();
+    let writer = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("gate-observed-state").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "deployment never reached the gate"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(1100));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(root.join("heartbeat"), now.to_string()).unwrap();
+    });
+    let started = Instant::now();
+    let result = fixture.run("deploy");
+    writer.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    let observed: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("gate-observed-state")).unwrap())
+            .unwrap();
+    assert_eq!(observed["pending"]["status"], "activating");
+    assert!(observed["current"].is_null());
+    assert_eq!(fixture.state()["current"]["status"], "active");
+    assert!(fixture.state()["pending"].is_null());
+}
+
+#[test]
+fn missing_heartbeat_expires_and_restores_previous_images_without_changing_release() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    fixture.next_revision();
+    fixture.gate(
+        "worker",
+        "type = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30",
+        2,
+    );
+    let started = Instant::now();
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("worker: Unknown (Heartbeat missing, unreadable or in the future)"),
+        "{error}"
+    );
+    let observed: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("gate-observed-state")).unwrap())
+            .unwrap();
+    assert_eq!(observed["pending"]["status"], "activating");
+    assert_eq!(observed["current"], before["current"]);
+    let after = fixture.state();
+    assert_eq!(after["current"], before["current"]);
+    assert_eq!(after["previous"], before["previous"]);
+    assert!(after["pending"].is_null());
+    for service in ["api", "worker"] {
+        let running = fs::read_to_string(fixture.root.join(format!("running-{service}"))).unwrap();
+        let expected = before["current"]["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == service)
+            .unwrap();
+        assert_eq!(running.trim(), expected["image"]);
+    }
+}
+
+#[test]
+fn fresh_but_pre_release_heartbeat_cannot_activate_new_worker() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    fixture.next_revision();
+    let old = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 5;
+    fs::write(fixture.root.join("heartbeat"), old.to_string()).unwrap();
+    fixture.gate(
+        "worker",
+        "type = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 3600",
+        2,
+    );
+    let result = fixture.run("deploy");
+    assert!(!result.status.success(), "stale heartbeat passed the gate");
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("worker: Unknown (Heartbeat predates the release)"),
+        "{error}"
+    );
+    assert_eq!(fixture.state()["current"], before["current"]);
+    assert!(fixture.state()["pending"].is_null());
+}
+
+#[test]
+fn healthy_api_does_not_hide_unhealthy_worker_gate() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    fixture.next_revision();
+    let server = fixture.health_server(None);
+    let worker = fixture.health_server(Some("never-healthy"));
+    fixture.gate(
+        "worker",
+        &format!("type = 'http'\nurl = '{}'\ntimeout_ms = 800", worker.url),
+        1,
+    );
+    let path = fixture.root.join("projects/demo.toml");
+    let manifest = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{manifest}\n[service_health.api]\ntype = 'http'\nurl = '{}'\ntimeout_ms = 800\ndeployment_gate = true\n", server.url)).unwrap();
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(server.requests.load(Ordering::Relaxed) >= 1);
+    assert!(worker.requests.load(Ordering::Relaxed) >= 1);
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("worker: Unhealthy (HTTP non-success response)"));
+    assert_eq!(fixture.state()["current"], before["current"]);
+}
+
+#[test]
+fn gate_timeout_reports_every_blocking_service() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let api = fixture.health_server(Some("never-healthy"));
+    let worker = fixture.health_server(Some("never-healthy"));
+    fixture.gate(
+        "worker",
+        &format!("type = 'http'\nurl = '{}'\ntimeout_ms = 800", worker.url),
+        1,
+    );
+    let path = fixture.root.join("projects/demo.toml");
+    let manifest = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{manifest}\n[service_health.api]\ntype = 'http'\nurl = '{}'\ntimeout_ms = 800\ndeployment_gate = true\n", api.url)).unwrap();
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("api: Unhealthy (HTTP non-success response)"),
+        "{error}"
+    );
+    assert!(
+        error.contains("worker: Unhealthy (HTTP non-success response)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn degraded_heartbeat_does_not_pass_deployment_gate() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    fixture.gate(
+        "worker",
+        "type = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 2",
+        1,
+    );
+    fs::write(fixture.root.join("delay-heartbeat"), "").unwrap();
+    let result = fixture.run("deploy");
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("worker: Degraded (outside healthy thresholds)"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fixture.state()["pending"].is_null());
+}
+
+#[test]
+fn manual_restore_bypasses_missing_deployment_gate() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    fixture.next_revision();
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    fixture.gate(
+        "worker",
+        "type = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30",
+        1,
+    );
+    let target = format!("release:{}", before["previous"]["tag"].as_str().unwrap());
+    let result = fixture.run_with_args("restore", &[&target, "--yes"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fixture.state()["current"]["revision"],
+        before["previous"]["revision"]
+    );
+    let log = fs::read_to_string(fixture.root.join("docker.log")).unwrap();
+    assert!(!log.contains("exec -T worker stat"));
 }
 
 #[test]

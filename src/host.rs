@@ -266,7 +266,7 @@ fn parse_docker_df(text: &str) -> Option<DockerUsage> {
     })
 }
 
-fn parse_containers(
+pub(crate) fn parse_containers(
     project: &str,
     migration_service: Option<&str>,
     text: &str,
