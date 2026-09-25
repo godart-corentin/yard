@@ -205,6 +205,18 @@ pub fn collect(
         .collect()
 }
 
+fn heartbeat_predates_release(service: &ServiceHealth, floor_unix: u64) -> bool {
+    service.kind == Some("heartbeat")
+        && service
+            .heartbeat_at_unix
+            // The floor second contains both old and new container beats, so never accept it.
+            .is_some_and(|stamp| stamp <= floor_unix)
+}
+
+fn gate_accepts(service: &ServiceHealth, floor_unix: u64) -> bool {
+    service.status == Health::Healthy && !heartbeat_predates_release(service, floor_unix)
+}
+
 pub fn wait_for_deployment_gates(project: &Project, floor_unix: u64) -> Result<()> {
     let gated: Vec<_> = project
         .config
@@ -240,11 +252,8 @@ pub fn wait_for_deployment_gates(project: &Project, floor_unix: u64) -> Result<(
             .into_iter()
             .filter(|service| gated.contains(&service.service.as_str()))
             .filter_map(|service| {
-                let before_release = service.kind == Some("heartbeat")
-                    && service
-                        .heartbeat_at_unix
-                        .is_some_and(|stamp| stamp < floor_unix);
-                if service.status == Health::Healthy && !before_release {
+                let before_release = heartbeat_predates_release(&service, floor_unix);
+                if gate_accepts(&service, floor_unix) {
                     return None;
                 }
                 let status = if before_release {
@@ -312,5 +321,26 @@ mod tests {
         assert_eq!(heartbeat_health(31, 30, limits), Health::Degraded);
         assert_eq!(heartbeat_health(91, 30, limits), Health::Unhealthy);
         assert_eq!(heartbeat_health(30, 30, limits), Health::Healthy);
+    }
+
+    #[test]
+    fn deployment_gate_requires_heartbeat_after_floor_second() {
+        let mut service = ServiceHealth {
+            project: "demo".into(),
+            service: "worker".into(),
+            status: Health::Healthy,
+            kind: Some("heartbeat"),
+            latency_ms: None,
+            age_seconds: Some(0),
+            heartbeat_at_unix: Some(100),
+            max_age_seconds: Some(30),
+            crit_multiplier: Some(2),
+            message: None,
+        };
+        assert!(!gate_accepts(&service, 100));
+        service.heartbeat_at_unix = Some(101);
+        assert!(gate_accepts(&service, 100));
+        service.heartbeat_at_unix = Some(99);
+        assert!(!gate_accepts(&service, 100));
     }
 }

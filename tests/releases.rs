@@ -225,6 +225,7 @@ case " $* " in
   *" exec -T worker stat -c %Y -- /run/yard/heartbeat "*)
     cp "$FAKE_ROOT/state/demo.json" "$FAKE_ROOT/gate-observed-state" 2>/dev/null || true
     if [ -f "$FAKE_ROOT/delay-heartbeat" ]; then
+      sleep 1
       date +%s > "$FAKE_ROOT/heartbeat"
       sleep 3
     fi
@@ -1255,6 +1256,9 @@ fn gate_timeout_reports_every_blocking_service() {
     let fixture = Fixture::new();
     fixture.setup_repo();
     fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    assert!(fixture.run("deploy").status.success());
+    let before = fixture.state();
+    fixture.next_revision();
     let api = fixture.health_server(Some("never-healthy"));
     let worker = fixture.health_server(Some("never-healthy"));
     fixture.gate(
@@ -1269,13 +1273,29 @@ fn gate_timeout_reports_every_blocking_service() {
     assert!(!result.status.success());
     let error = String::from_utf8_lossy(&result.stderr);
     assert!(
-        error.contains("api: Unhealthy (HTTP non-success response)"),
+        error.contains("api: Unhealthy (HTTP non-success response)")
+            || error.contains("api: Unhealthy (HTTP request failed or timed out)"),
         "{error}"
     );
     assert!(
-        error.contains("worker: Unhealthy (HTTP non-success response)"),
+        error.contains("worker: Unhealthy (HTTP non-success response)")
+            || error.contains("worker: Unhealthy (HTTP request failed or timed out)"),
         "{error}"
     );
+    let after = fixture.state();
+    assert_eq!(after["current"], before["current"]);
+    assert_eq!(after["previous"], before["previous"]);
+    assert!(after["pending"].is_null());
+    for service in ["api", "worker"] {
+        let running = fs::read_to_string(fixture.root.join(format!("running-{service}"))).unwrap();
+        let expected = before["current"]["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == service)
+            .unwrap();
+        assert_eq!(running.trim(), expected["image"]);
+    }
 }
 
 #[test]
