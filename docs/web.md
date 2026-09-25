@@ -33,8 +33,11 @@ until the configured timeout, not failed immediately. Set positive
 `[deployment] gate_attempts` (default 30) and `gate_interval_seconds` (default 2)
 to control the attempts and spacing. A heartbeat predating completion of the
 new release's Compose startup never counts, even if its age is within the
-configured limit. Timeout fails deployment and triggers application-image
-rollback. Manual `yard restore` bypasses these gates for emergency recovery;
+configured limit. With one-second timestamps, a beat in the same second as
+service startup is ignored too: the worker must emit periodically for a later
+beat to count. Waiting remains bounded by the configured timeout; a timeout
+fails deployment and triggers application-image rollback. Manual `yard restore`
+bypasses these gates for emergency recovery;
 the separate `deployment.health_url` check is unchanged. Web only displays
 the existing probe states; it does not run the deployment gate.
 An undeclared service probe is explicitly Unknown in the CLI and host snapshot;
