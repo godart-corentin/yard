@@ -23,6 +23,8 @@ migration_service = "migrate"
 health_url = "https://api.example.com/health"
 health_attempts = 30
 health_interval_seconds = 2
+gate_attempts = 30 # Defaults to 30 attempts when omitted.
+gate_interval_seconds = 2 # Defaults to 2 seconds between attempts.
 
 # Status probes are independent of deployment.health_url. Omit a probe for
 # explicit Unknown health. The CLI probes these; Web reads the CLI snapshot.
@@ -30,6 +32,7 @@ health_interval_seconds = 2
 type = "http"
 url = "https://api.example.com/health"
 timeout_ms = 2000
+deployment_gate = true # Optional; false by default. All gated probes must be Healthy.
 
 # The worker must periodically `touch /run/yard/heartbeat` INSIDE its container.
 # Keep this file in the container's ephemeral filesystem, not a persistent volume.
@@ -37,6 +40,7 @@ timeout_ms = 2000
 type = "heartbeat"
 path = "/run/yard/heartbeat"
 max_age_seconds = 60
+deployment_gate = true # Old heartbeats from before this release's startup do not count.
 
 # Optional backup of persistent data before deployment/rollback.
 [backup]

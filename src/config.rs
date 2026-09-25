@@ -18,6 +18,14 @@ fn default_health_interval_seconds() -> u64 {
     2
 }
 
+fn default_gate_attempts() -> u32 {
+    30
+}
+
+fn default_gate_interval_seconds() -> u64 {
+    2
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
     pub repo: PathBuf,
@@ -89,8 +97,18 @@ pub struct ImageConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum ServiceProbe {
-    Http { url: String, timeout_ms: u64 },
-    Heartbeat { path: PathBuf, max_age_seconds: u64 },
+    Http {
+        url: String,
+        timeout_ms: u64,
+        #[serde(default)]
+        deployment_gate: bool,
+    },
+    Heartbeat {
+        path: PathBuf,
+        max_age_seconds: u64,
+        #[serde(default)]
+        deployment_gate: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +121,12 @@ pub struct DeploymentConfig {
 
     #[serde(default = "default_health_interval_seconds")]
     pub health_interval_seconds: u64,
+
+    #[serde(default = "default_gate_attempts")]
+    pub gate_attempts: u32,
+
+    #[serde(default = "default_gate_interval_seconds")]
+    pub gate_interval_seconds: u64,
 }
 
 impl Default for DeploymentConfig {
@@ -112,6 +136,8 @@ impl Default for DeploymentConfig {
             health_url: None,
             health_attempts: default_health_attempts(),
             health_interval_seconds: default_health_interval_seconds(),
+            gate_attempts: default_gate_attempts(),
+            gate_interval_seconds: default_gate_interval_seconds(),
         }
     }
 }
@@ -190,6 +216,16 @@ impl ProjectConfig {
                 "deployment.health_interval_seconds must be greater than zero".into(),
             ));
         }
+        if self.deployment.gate_attempts == 0 {
+            return Err(YardError::Config(
+                "deployment.gate_attempts must be greater than zero".into(),
+            ));
+        }
+        if self.deployment.gate_interval_seconds == 0 {
+            return Err(YardError::Config(
+                "deployment.gate_interval_seconds must be greater than zero".into(),
+            ));
+        }
         for (name, probe) in &self.service_health {
             if !self.compose.services.contains(name) {
                 return Err(YardError::Config(format!(
@@ -197,7 +233,9 @@ impl ProjectConfig {
                 )));
             }
             match probe {
-                ServiceProbe::Http { url, timeout_ms } => {
+                ServiceProbe::Http {
+                    url, timeout_ms, ..
+                } => {
                     let valid = reqwest::Url::parse(url).ok().is_some_and(|parsed| {
                         matches!(parsed.scheme(), "http" | "https")
                             && parsed.host().is_some()
@@ -213,6 +251,7 @@ impl ProjectConfig {
                 ServiceProbe::Heartbeat {
                     path,
                     max_age_seconds,
+                    ..
                 } => {
                     if !path.is_absolute()
                         || path
@@ -297,7 +336,7 @@ fn valid_service_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_env_name, ProjectConfig};
+    use super::{valid_env_name, ProjectConfig, ServiceProbe};
 
     #[test]
     fn validates_environment_variable_names() {
@@ -326,5 +365,43 @@ mod tests {
             let parsed: ProjectConfig = toml::from_str(&bad).unwrap();
             assert!(parsed.validate().is_err());
         }
+    }
+
+    #[test]
+    fn deployment_gates_default_off_and_timeout_defaults_are_validated() {
+        let base = "repo = '/srv/app'\nbranch = 'main'\n[compose]\ndirectory = '/srv/app'\nfile = 'compose.yml'\nenv_file = '.env'\nservices = ['api', 'worker']\n[image]\nname = 'app'\ntag_env = 'APP_TAG'\n";
+        let probes = "\n[service_health.api]\ntype = 'http'\nurl = 'http://127.0.0.1:8080/health'\ntimeout_ms = 800\n[service_health.worker]\ntype = 'heartbeat'\npath = '/run/yard/heartbeat'\nmax_age_seconds = 30\n";
+        let parsed: ProjectConfig = toml::from_str(&format!("{base}{probes}")).unwrap();
+        parsed.validate().unwrap();
+        assert!(matches!(
+            parsed.service_health["api"],
+            ServiceProbe::Http {
+                deployment_gate: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parsed.service_health["worker"],
+            ServiceProbe::Heartbeat {
+                deployment_gate: false,
+                ..
+            }
+        ));
+        assert_eq!(parsed.deployment.gate_attempts, 30);
+        assert_eq!(parsed.deployment.gate_interval_seconds, 2);
+
+        for field in ["gate_attempts", "gate_interval_seconds"] {
+            let manifest = format!("{base}\n[deployment]\n{field} = 0\n");
+            let parsed: ProjectConfig = toml::from_str(&manifest).unwrap();
+            assert!(parsed.validate().unwrap_err().to_string().contains(field));
+        }
+        let explicit: ProjectConfig = toml::from_str(&format!("{base}\n[service_health.api]\ntype = 'http'\nurl = 'http://localhost/health'\ntimeout_ms = 800\ndeployment_gate = true\n")).unwrap();
+        assert!(matches!(
+            explicit.service_health["api"],
+            ServiceProbe::Http {
+                deployment_gate: true,
+                ..
+            }
+        ));
     }
 }
