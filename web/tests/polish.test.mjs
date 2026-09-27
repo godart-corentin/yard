@@ -64,18 +64,28 @@ function browser (fetchRead = () => new Promise(() => {})) {
   ].map(id => [id, new Element()]))
   const listeners = {}
   const scrolls = []
+  const deferred = []
+  let scrollY = 0
   let interval
   const location = { hash: '#/services' }
   const context = {
     document: { querySelector: selector => nodes[selector.startsWith('#') ? selector.slice(1) : selector], createElement: tag => new Element(tag) },
-    window: { addEventListener: (name, handler) => { listeners[name] = handler }, scrollTo: (...args) => scrolls.push(args) },
+    window: { addEventListener: (name, handler) => { listeners[name] = handler }, scrollTo: (...args) => { scrolls.push(args); scrollY = args[1] } },
     location, fetch: (url) => url.startsWith('/api/read') ? fetchRead(url) : Promise.resolve({ ok: true, json: async () => payload }),
-    setInterval: callback => { interval = callback }, URL, URLSearchParams
+    setInterval: callback => { interval = callback }, setTimeout: callback => { deferred.push(callback) }, URL, URLSearchParams
   }
   vm.runInNewContext(`${source}\nglobalThis.testAPI = { render, renderRoute, load }`, context)
   return {
     nodes, scrolls, api: context.testAPI, refresh: () => interval(),
     navigate: hash => { location.hash = hash; listeners.hashchange() },
+    traverse: hash => {
+      location.hash = hash
+      listeners.popstate?.()
+      listeners.hashchange?.()
+      scrollY = 350 // Browser restores the history entry after navigation listeners run.
+      for (const callback of deferred.splice(0)) callback()
+    },
+    setScroll: y => { scrollY = y }, getScroll: () => scrollY,
     read: () => nodes['read-view'], projects: () => nodes.projects
   }
 }
@@ -101,27 +111,67 @@ test('mixed cards retain semantic single detail links and independent external l
   assert.equal(find(cards[1], '.endpoint-link')[0].href, 'https://example.test/')
 })
 
-test('hash navigation resets scroll including back/forward, but status refresh and in-panel actions do not', async () => {
+test('route links reset scroll; history traversal wins over native restoration; in-panel actions preserve scroll', async () => {
   const page = browser(async () => response(200, { output: 'real response' }))
   await tick()
+  page.setScroll(350)
   page.navigate('#/project/app/logs')
   assert.equal(page.scrolls.length, 1)
   assert.deepEqual([...page.scrolls[0]], [0, 0])
+  assert.equal(page.getScroll(), 0)
   assert.equal(page.nodes['nav-services'].attributes['aria-current'], 'page')
   assert.equal(find(page.read(), '.read-operations').length, 0)
   assert.equal(find(page.read(), '.read-scope').length, 1)
+  page.setScroll(350)
+  page.read().querySelector('.read-tail').value = '50'
   page.read().querySelector('.read-filters').dispatch('submit')
   await tick()
   assert.equal(page.scrolls.length, 1)
+  assert.equal(page.getScroll(), 350)
   await page.refresh()
   assert.equal(page.scrolls.length, 1)
+  assert.equal(page.getScroll(), 350)
+  page.nodes.refresh.dispatch('click')
+  await tick()
+  assert.equal(page.getScroll(), 350)
   page.navigate('#/images')
   assert.equal(page.scrolls.length, 2)
+  assert.equal(page.getScroll(), 0)
   assert.equal(page.nodes['nav-images'].attributes['aria-current'], 'page')
   assert.equal(page.nodes['nav-services'].attributes['aria-current'], undefined)
-  page.navigate('#/project/app/logs') // browser back
-  page.navigate('#/services') // browser forward
-  assert.equal(page.scrolls.length, 4)
+  page.setScroll(350)
+  page.read().querySelector('.read-button').dispatch('click')
+  await tick()
+  assert.equal(page.getScroll(), 350)
+  page.traverse('#/project/app/logs') // browser back, then native scroll restoration
+  assert.equal(page.getScroll(), 0)
+  assert.equal(page.read().querySelector('.read-filters')?.tag, 'form')
+  page.setScroll(350)
+  page.traverse('#/images') // browser forward
+  assert.equal(page.getScroll(), 0)
+  page.setScroll(350)
+  const resets = page.scrolls.length
+  page.navigate('#/images')
+  page.traverse('#/images')
+  assert.equal(page.scrolls.length, resets)
+  assert.equal(page.getScroll(), 350)
+})
+
+test('Back and Forward between project overview and logs reset restored scroll', async () => {
+  const page = browser(async () => response(200, { output: 'logs' }))
+  await tick()
+  page.navigate('#/project/app/overview')
+  page.setScroll(350)
+  page.navigate('#/project/app/logs')
+  assert.equal(page.getScroll(), 0)
+  page.setScroll(350)
+  page.traverse('#/project/app/overview')
+  assert.equal(page.getScroll(), 0)
+  assert.equal(page.read().querySelector('.read-filters'), undefined)
+  page.setScroll(350)
+  page.traverse('#/project/app/logs')
+  assert.equal(page.getScroll(), 0)
+  assert.equal(page.read().querySelector('.read-filters')?.tag, 'form')
 })
 
 for (const view of ['images', 'logs']) {

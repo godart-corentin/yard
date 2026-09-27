@@ -13,6 +13,7 @@ const dashboardViewEl = document.querySelector('#dashboard-view')
 let lastPayload = null
 let readGeneration = 0
 let renderedRoute = null
+let navigatedHash = typeof location === 'undefined' ? '' : location.hash
 
 const labels = {
   operational: 'Operational',
@@ -617,8 +618,20 @@ const renderRoute = payload => {
 }
 
 if (typeof window !== 'undefined') window.addEventListener('hashchange', () => {
+  if (location.hash === navigatedHash) return
+  navigatedHash = location.hash
   window.scrollTo(0, 0)
   if (lastPayload) renderRoute(lastPayload)
+})
+
+if (typeof window !== 'undefined') window.addEventListener('popstate', () => {
+  const hash = location.hash
+  if (hash === navigatedHash) return
+  // History traversal can restore the entry's scroll after popstate; leave native
+  // restoration enabled, then override it only for a changed application route.
+  setTimeout(() => {
+    if (location.hash === hash) window.scrollTo(0, 0)
+  }, 0)
 })
 
 const load = async () => {
