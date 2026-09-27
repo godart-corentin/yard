@@ -59,4 +59,11 @@ if [[ -f "$YARD_COMPOSE" ]]; then
   rm -f "$YARD_COMPOSE"
 fi
 
+if [[ -f /etc/systemd/system/yard-web-read.service ]] \
+  && grep -Fq '# Yard Web read-only executor' /etc/systemd/system/yard-web-read.service; then
+  systemctl disable --now yard-web-read.service
+  rm -f /etc/systemd/system/yard-web-read.service
+  systemctl daemon-reload
+fi
+
 echo "Yard Web removed. Yard CLI configuration and state were left untouched."

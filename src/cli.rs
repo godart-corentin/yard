@@ -19,6 +19,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Serve the read-only Web operations over a local Unix socket.
+    #[command(hide = true)]
+    ReadServer {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// List configured projects.
     List,
 

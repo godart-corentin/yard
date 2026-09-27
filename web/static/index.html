@@ -41,6 +41,13 @@
         </button>
       </header>
 
+      <nav class="product-nav" aria-label="Sections">
+        <a href="#/services" id="nav-services">Services</a>
+        <a href="#/host" id="nav-host">Host</a>
+        <a href="#/images" id="nav-images">Images</a>
+      </nav>
+
+      <div id="dashboard-view">
       <section class="summary" aria-label="Service summary" aria-live="polite">
         <div class="summary-item">
           <span class="summary-label">Total services</span>
@@ -60,7 +67,7 @@
         </div>
       </section>
 
-      <section aria-labelledby="host-title">
+      <section id="host-section" aria-labelledby="host-title">
         <div class="section-title">
           <div>
             <h1 id="host-title">Host</h1>
@@ -71,7 +78,7 @@
         <div id="host-metrics" class="host-metrics" aria-live="polite"></div>
       </section>
 
-      <section aria-labelledby="services-title">
+      <section id="services-section" aria-labelledby="services-title">
         <div class="section-title">
           <div>
             <h1 id="services-title">Services</h1>
@@ -83,6 +90,8 @@
           <div class="empty">Loading Yard services…</div>
         </div>
       </section>
+      </div>
+      <section id="read-view" aria-live="polite" hidden></section>
     </main>
 
     <script src="/app.js" type="module"></script>

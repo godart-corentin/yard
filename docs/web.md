@@ -1,4 +1,4 @@
-# Yard Web status page
+# Yard Web status and read-only operations
 
 Yard Web is an optional private status page for the projects already configured in Yard.
 It does not introduce a second project inventory: `/etc/yard/projects/*.toml` remains the source of truth.
@@ -120,6 +120,10 @@ The container exposes the following endpoints only to its Docker network:
 ```text
 GET /healthz
 GET /api/status
+GET /api/read?op=images
+GET /api/read?op=logs&project=hello-api&service=api&tail=200&since=2h
+GET /api/read?op=restore-points&project=hello-api
+GET /api/read?op=restore-log&project=hello-api
 ```
 
 `/api/status` reports the overall state and, per project:
@@ -141,6 +145,10 @@ The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (v
 The dashboard's **Host** section shows only CPU, RAM, physical disks and the measurement age. Its badge reflects the most severe CPU/RAM/disk status (or `Unknown` if the snapshot is unavailable); stopped containers, load and Docker usage do not affect it. The **Services** section lists each container beneath its matching project card, with the Compose service name, state and status. A configured migration service that exited with code 0 appears as `Completed` and does not degrade the project. Other stopped containers degrade their service even when the HTTP check succeeds; a failed HTTP check leaves the service `Down`. The Services badge and summary counts reflect these displayed service states. Without a fresh host snapshot, container states cannot be shown and project badges reflect HTTP health alone. The CLI still displays Load, Docker usage and containers, and `/api/status` still exposes all of them in the snapshot; they are simply not displayed in Host.
 
 The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks.
+
+The Services cards open a project overview and read-only tabs for Logs, Restore points and Restore log. The global Images view displays `yard images` inventory as reported by the host; these views show the actual bounded CLI output or an explicit error. Logs are one-shot (`--no-follow`) and limited to 1000 requested lines, 128 KiB returned and 10 seconds execution; `since` is restricted to short Docker duration/timestamp characters. An unknown service is refused against the project's configured Compose services. URL-only monitors have HTTP status but no CLI read or deployment actions. Image inventory failure blocks display rather than presenting a guessed reclaimable list. No buttons for deploy, backup, restore, prune or host collection are enabled. `yard images --prune --yes` (CLI-only) removes all eligible candidates, not a selection.
+
+The host-side `yard-web-read.service` is installed by `install-web.sh` after the updated CLI is installed. It owns `/run/yard-web-read/read.sock` (mode 0660, group 65532 inside a mode 0750 directory). Web mounts that directory read-only; it never mounts Docker's socket. The host executor accepts only `images`, `logs`, `restore-points`, `restore-log` with exact bounded parameters, checks the project against the TOML inventory and refuses URL monitors. It spawns its own installed Yard binary with fixed subcommands and no shell, truncates/rejects excessive output and kills the command process group on timeout. Both sides reject extra fields and unsafe values, and Web sanitizes host errors. The systemd service uses a read-only filesystem, no capabilities, no new privileges and a private network; it nevertheless runs as root to read mode-0600 Yard state and Compose `.env` and access the Docker socket. Review this operational privilege before deployment and keep Basic Auth and the host protected. No new public port is opened.
 
 ## Update
 

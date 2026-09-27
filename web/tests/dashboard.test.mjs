@@ -232,3 +232,51 @@ test('unconfigured service probe does not create a Service health section', () =
   assert.equal(byClass(card, 'container-row').length, 1)
   assert.equal(byClass(card, 'service-header')[0].children[1].textContent, 'Operational')
 })
+
+test('project read views expose bounded one-shot log filters and no mutation controls', () => {
+  const elements = dashboard()
+  elements['read-view'] = new Element()
+  elements['dashboard-view'] = new Element()
+  const context = { document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL, URLSearchParams,
+    location: { hash: '#/project/hello-api/logs' } }
+  vm.runInNewContext(`${source}\nglobalThis.renderReadForTest = renderReadView`, context)
+  context.renderReadForTest({ ...payload, projects: [
+    { ...payload.projects[0], application_services: ['api', 'worker'], url_monitor: false },
+    payload.projects[1]
+  ] }, 'hello-api', 'logs')
+  const view = elements['read-view']
+  assert.match(view.textContent, /All services.*hello-api.*Overview.*Logs.*Restore points.*Restore log/)
+  assert.match(view.textContent, /Service.*Tail.*Since.*Load logs.*Follow is not available/i)
+  assert.equal(byClass(view, 'read-service').length, 1)
+  assert.equal(byClass(view, 'read-tail').length, 1)
+  assert.equal(byClass(view, 'read-since').length, 1)
+  assert.equal(byClass(view, 'read-button').length, 1)
+  assert.doesNotMatch(view.textContent, /Prune selected|Restore…|Following/)
+})
+
+test('URL monitor shows an honest read-only overview and no CLI read actions', () => {
+  const elements = dashboard()
+  elements['read-view'] = new Element()
+  elements['dashboard-view'] = new Element()
+  const context = { document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL, URLSearchParams,
+    location: { hash: '#/project/monitor/overview' } }
+  vm.runInNewContext(`${source}\nglobalThis.renderReadForTest = renderReadView`, context)
+  context.renderReadForTest({ ...payload, projects: [{ name: 'monitor', health_url: 'http://example.test', status: 'operational', url_monitor: true, application_services: [] }] }, 'monitor', 'overview')
+  assert.match(elements['read-view'].textContent, /URL monitor.*No deployment actions/)
+  assert.doesNotMatch(elements['read-view'].textContent, /Load logs|Restore points.*Load|Deploy/)
+})
+
+test('refresh removes a read view when its project leaves the inventory', () => {
+  const elements = dashboard()
+  elements['read-view'] = new Element()
+  elements['dashboard-view'] = new Element()
+  const context = { document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL, URLSearchParams,
+    location: { hash: '#/project/hello-api/logs' } }
+  vm.runInNewContext(`${source}\nglobalThis.routeForTest = renderRoute`, context)
+  context.routeForTest({ ...payload, projects: [{ ...payload.projects[0], application_services: ['api'] }] })
+  context.routeForTest({ ...payload, projects: [] })
+  assert.match(elements['read-view'].textContent, /Project not found/)
+})
