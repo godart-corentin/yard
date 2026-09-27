@@ -448,7 +448,9 @@ const readUnavailable = (title, action, status, serverMessage) => {
   state.append(element('p', '', causes[status] || (status ? `HTTP ${status} — the read could not be completed.` : 'The read could not be completed (transport or invalid response).')))
   state.append(element('p', '', `Use ${action} to repeat this request.${status === 502 ? ' If it keeps failing, inspect the host read executor (yard-web-read).' : status === 503 ? ' If it keeps failing, check the host read executor service.' : ''}`))
   const expected = { 400: 'Read operation refused', 502: 'Read operation failed or output limit exceeded', 503: 'Read executor unavailable' }
-  if (serverMessage === expected[status]) state.append(element('p', 'read-detail', `Server message · ${serverMessage}`))
+  if (typeof serverMessage === 'string' && serverMessage.trim() && serverMessage === expected[status]) {
+    state.append(element('p', 'read-detail', `Server message · ${serverMessage}`))
+  }
   return state
 }
 

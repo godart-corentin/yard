@@ -161,31 +161,40 @@ for (const view of ['images', 'logs']) {
     assert.match(page.read().querySelector('.read-output').textContent, /No output returned/)
     assert.equal(find(page.read(), '.read-unavailable').length, 0)
   })
-  test(`${view}: invalid or unsafe bodies and transport errors never disclose arbitrary text`, async () => {
+  test(`${view}: generic HTTP 502 never discloses arbitrary server text`, async () => {
     const page = browser(async () => response(502, { error: 'secret from host' }))
     page.api.render(payload)
     page.navigate(route)
     await tick()
     assert.doesNotMatch(page.read().textContent, /secret from host/)
     assert.match(page.read().textContent, /HTTP 502/)
+    assert.equal(find(page.read(), '.read-detail').length, 0)
   })
-  test(`${view}: transport and non-JSON replies are unavailable without leaking exceptions`, async () => {
-    let broken = true
-    const page = browser(async () => broken ? Promise.reject(new Error('private connection detail')) : {
-      ok: false, status: 503, json: async () => { throw new Error('private JSON detail') }
+  for (const [failure, fetchFailure] of [
+    ['aborted transport', () => Promise.reject(new Error('private connection detail'))],
+    ['non-JSON HTTP 200', async () => ({ ok: true, status: 200, json: async () => { throw new Error('private JSON detail') } })]
+  ]) {
+    test(`${view}: ${failure} is unavailable without a server detail and recovers on retry`, async () => {
+      let broken = true
+      const page = browser(async () => broken ? fetchFailure() : response(200, { output: 'real recovered output' }))
+      page.api.render(payload)
+      page.navigate(route)
+      await tick()
+      const state = page.read().querySelector('.read-unavailable')
+      assert.equal(state.attributes.role, 'alert')
+      assert.match(state.textContent, /transport or invalid response/)
+      assert.doesNotMatch(state.textContent, /undefined|private|No output returned/)
+      assert.equal(find(state, '.read-detail').length, 0)
+      assert.equal(find(page.read(), '.read-output').length, 0)
+      assert.equal(find(page.read(), '.read-button').length, 1)
+      broken = false
+      if (view === 'images') page.read().querySelector('.read-button').dispatch('click')
+      else page.read().querySelector('.read-filters').dispatch('submit')
+      await tick()
+      assert.equal(find(page.read(), '.read-unavailable').length, 0)
+      assert.equal(page.read().querySelector('.read-output').textContent, 'real recovered output')
     })
-    page.api.render(payload)
-    page.navigate(route)
-    await tick()
-    assert.match(page.read().textContent, /transport or invalid response/)
-    assert.doesNotMatch(page.read().textContent, /private/)
-    broken = false
-    if (view === 'images') page.read().querySelector('.read-button').dispatch('click')
-    else page.read().querySelector('.read-filters').dispatch('submit')
-    await tick()
-    assert.equal(find(page.read(), '.read-unavailable').length, 1)
-    assert.doesNotMatch(page.read().textContent, /private/)
-  })
+  }
   test(`${view}: limit failure never appears as an empty success and retry replaces error`, async () => {
     let oversized = true
     const page = browser(async () => response(oversized ? 502 : 200,
