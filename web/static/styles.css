@@ -276,19 +276,33 @@ a:focus-visible {
 
 .service-card {
   display: flex;
+  position: relative;
   min-width: 0;
-  min-height: 278px;
   flex-direction: column;
   padding: 19px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--panel);
+  cursor: pointer;
   transition: background-color 160ms ease, border-color 160ms ease;
 }
 
 .service-card:hover {
   border-color: var(--border-strong);
   background: var(--panel-hover);
+}
+.service-card:active { background: #20252c; }
+.service-card:has(.service-name a:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.service-name a:focus-visible { outline: none; }
+.service-card:hover .service-name a, .service-card:focus-within .service-name a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.service-name a::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  content: "";
 }
 
 .service-header {
@@ -328,6 +342,8 @@ a:focus-visible {
 }
 
 .endpoint-link {
+  position: relative;
+  z-index: 1;
   min-width: 0;
   overflow: hidden;
   color: #a7f3d0;
@@ -402,7 +418,6 @@ a:focus-visible {
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  margin-top: auto;
   padding-top: 15px;
 }
 
@@ -640,13 +655,10 @@ a:focus-visible {
 .read-heading h1 { margin: 0; font-size: 24px; overflow-wrap: anywhere; }
 .read-meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .read-tabs { margin: 24px 0; }
-.read-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 336px;
-  gap: 24px;
-  align-items: start;
-}
+.read-scope { margin: -8px 0 20px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); font-size: 13px; }
 .read-main { min-width: 0; }
+.read-main .read-panel:has(.service-card) { max-width: 600px; }
+.read-main .service-card { max-width: 560px; }
 .read-panel {
   min-width: 0;
   margin-bottom: 16px;
@@ -658,25 +670,7 @@ a:focus-visible {
 .read-panel h2 { margin: 0; font-size: 18px; }
 .read-caption, .read-note { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .read-caption { margin: 4px 0 18px; }
-.read-operations { position: sticky; top: 16px; }
-.read-operation {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 12px;
-  align-items: center;
-  padding: 11px 0;
-  border-top: 1px solid var(--border);
-}
-.read-operation code { grid-column: 1; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.read-operation a {
-  grid-column: 2;
-  grid-row: 1 / 3;
-  min-height: 36px;
-  padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  text-decoration: none;
-}
+
 .read-filters {
   display: grid;
   grid-template-columns: minmax(100px, 1fr) 112px minmax(140px, 1.3fr) auto;
@@ -696,7 +690,7 @@ a:focus-visible {
   font: inherit;
 }
 .read-button { width: auto; background: var(--panel-hover); cursor: pointer; }
-.read-button:hover, .read-operation a:hover { border-color: var(--good); }
+.read-button:hover { border-color: var(--good); }
 .read-filters input:focus-visible, .read-filters select:focus-visible { outline: 2px solid var(--focus); }
 .read-output {
   max-width: 100%;
@@ -713,17 +707,28 @@ a:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.read-unavailable {
+  min-height: 110px;
+  margin: 18px 0 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.read-unavailable-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--text); }
+.read-unavailable p { margin: 12px 0 0; }
+.read-unavailable .read-detail { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--subtle); }
 .read-error { color: var(--bad); }
 .read-main .service-card { min-height: 0; }
 @media (max-width: 900px) {
-  .read-layout { display: flex; flex-direction: column-reverse; }
-  .read-main, .read-operations { width: 100%; position: static; }
   .read-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
   .product-nav, .read-tabs { gap: 14px; }
   .read-panel { padding: 16px; }
   .read-filters { grid-template-columns: 1fr; }
-  .read-filters select, .read-filters input, .read-button, .read-operation a { min-height: 40px; }
-  .read-output { padding: 10px; }
+  .read-filters select, .read-filters input, .read-button { min-height: 40px; }
+  .read-output, .read-unavailable { padding: 10px; }
 }
