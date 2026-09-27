@@ -231,7 +231,7 @@ const renderProject = (project, containers) => {
   const releaseValue = document.createElement('div')
   releaseValue.className = 'release-value'
   const releaseTag = document.createElement('code')
-  releaseTag.textContent = release.tag || shortRevision(release.revision)
+  releaseTag.textContent = release.tag || (release.revision ? shortRevision(release.revision) : 'Not recorded')
   releaseValue.append(releaseTag)
   if (release.tag && release.revision && !String(release.revision).startsWith(String(release.tag))) {
     const releaseSha = document.createElement('span')
@@ -424,6 +424,7 @@ const element = (tag, className, text) => {
 const readLink = (label, href, active = false) => {
   const link = element('a', active ? 'active' : '', label)
   link.href = href
+  if (active) link.setAttribute('aria-current', 'page')
   return link
 }
 
@@ -433,21 +434,46 @@ const readPanel = (title, subtitle) => {
   return panel
 }
 
-const readOutput = (panel, params) => {
+const readUnavailable = (title, action, status, serverMessage) => {
+  const state = element('div', 'read-unavailable')
+  state.setAttribute('role', 'alert')
+  const heading = element('div', 'read-unavailable-heading')
+  heading.append(element('span', 'badge unknown', 'Unavailable'), element('strong', '', `${title} unavailable`))
+  state.append(heading)
+  const causes = {
+    400: 'HTTP 400 — this read was refused by the allowlist or its bounded parameters. Check the selected service and refresh the inventory.',
+    502: 'HTTP 502 — the host read failed; the exact cause is unknown to this page. A failed command, timeout, output above 128 KiB or invalid executor reply are possible.',
+    503: 'HTTP 503 — the read executor on the host did not answer. No data was read; this is not an empty result.'
+  }
+  state.append(element('p', '', causes[status] || (status ? `HTTP ${status} — the read could not be completed.` : 'The read could not be completed (transport or invalid response).')))
+  state.append(element('p', '', `Use ${action} to repeat this request.${status === 502 ? ' If it keeps failing, inspect the host read executor (yard-web-read).' : status === 503 ? ' If it keeps failing, check the host read executor service.' : ''}`))
+  const expected = { 400: 'Read operation refused', 502: 'Read operation failed or output limit exceeded', 503: 'Read executor unavailable' }
+  if (serverMessage === expected[status]) state.append(element('p', 'read-detail', `Server message · ${serverMessage}`))
+  return state
+}
+
+const clearRead = panel => {
+  panel.querySelector?.('.read-output')?.remove()
+  panel.querySelector?.('.read-unavailable')?.remove()
+}
+
+const readOutput = (panel, params, title, action) => {
   const output = element('pre', 'read-output', 'Loading real host data…')
   output.setAttribute('role', 'status')
   panel.append(output)
   const generation = ++readGeneration
   fetch(`/api/read?${new URLSearchParams(params)}`, { cache: 'no-store' }).then(async response => {
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.error || `Read failed (HTTP ${response.status})`)
-    return data
-  }).then(data => {
-    if (generation === readGeneration) output.textContent = data.output || 'No output returned.'
-  }).catch(error => {
-    if (generation === readGeneration) {
-      output.className = 'read-output read-error'
-      output.textContent = error.message || 'Read unavailable'
+    let data
+    try { data = await response.json() } catch { return { status: null } }
+    if (!response.ok) return { status: response.status, message: data?.error }
+    return typeof data?.output === 'string' ? { output: data.output } : { status: null }
+  }).catch(() => ({ status: null })).then(result => {
+    if (generation !== readGeneration) return
+    if ('output' in result) {
+      output.textContent = result.output || 'No output returned.'
+    } else {
+      output.remove()
+      panel.append(readUnavailable(title, action, result.status, result.message))
     }
   })
 }
@@ -479,20 +505,9 @@ const renderReadView = (payload, name, tab) => {
     tabs.append(readLink(label, `#/project/${encodeURIComponent(name)}/${key}`, tab === key))
   }
   readViewEl.append(tabs)
+  readViewEl.append(element('p', 'read-scope', 'Read-only view — deploy, backup, restore, prune and host collection are unavailable here.'))
   const grid = element('div', 'read-layout')
   const content = element('div', 'read-main')
-  const operations = readPanel('Operations', 'Only allowlisted read commands in this lot.')
-  operations.className = 'read-panel read-operations'
-  for (const [label, command, target] of [
-    ['Logs', `yard logs ${name} --no-follow`, 'logs'],
-    ['Restore points', `yard restore-points ${name}`, 'restore-points'],
-    ['Restore log', `yard restore-log ${name}`, 'restore-log']
-  ]) {
-    const row = element('div', 'read-operation')
-    row.append(element('strong', '', label), element('code', '', command), readLink('Open', `#/project/${encodeURIComponent(name)}/${target}`))
-    operations.append(row)
-  }
-  operations.append(element('p', 'read-note', 'Deploy, backup, restore, prune and host collection are unavailable here.'))
   if (tab === 'overview') {
     const panel = readPanel('Status', 'Current HTTP health and recorded Yard state · /api/status')
     const containers = payload.host?.status === 'available' ? payload.host.snapshot?.containers || [] : []
@@ -534,8 +549,8 @@ const renderReadView = (payload, name, tab) => {
       const params = { op: 'logs', project: name, tail: tail.value }
       if (service.value) params.service = service.value
       if (since.value?.trim()) params.since = since.value.trim()
-      panel.querySelector?.('.read-output')?.remove()
-      readOutput(panel, params)
+      clearRead(panel)
+      readOutput(panel, params, 'Application logs', 'Load logs')
     }
     form.addEventListener('submit', event => { event.preventDefault(); request() })
     content.append(panel)
@@ -544,12 +559,12 @@ const renderReadView = (payload, name, tab) => {
     const title = tab === 'restore-points' ? 'Recorded releases and backup attempts' : 'Restore attempt journal'
     const panel = readPanel(title, `yard ${tab} ${name} · read-only output from the host`)
     if (tab === 'restore-points') panel.append(element('p', 'read-note', 'Only recorded application releases. Backup destinations are descriptive metadata, not restorable data targets.'))
-    readOutput(panel, { op: tab, project: name })
+    readOutput(panel, { op: tab, project: name }, title, 'Refresh')
     content.append(panel)
   } else {
     content.append(element('p', 'read-error', 'Unknown project view.'))
   }
-  grid.append(content, operations)
+  grid.append(content)
   readViewEl.append(grid)
 }
 
@@ -561,12 +576,12 @@ const renderImagesView = () => {
   panel.append(element('p', 'read-note', 'Inventory fails closed when release state or Docker inspection is unavailable. Prune is CLI-only and removes all eligible candidates, never a selection.'))
   const button = element('button', 'read-button', 'Re-run inventory')
   button.addEventListener('click', () => {
-    panel.querySelector?.('.read-output')?.remove()
-    readOutput(panel, { op: 'images' })
+    clearRead(panel)
+    readOutput(panel, { op: 'images' }, 'Image revisions', 'Re-run inventory')
   })
   panel.append(button)
   readViewEl.append(panel)
-  readOutput(panel, { op: 'images' })
+  readOutput(panel, { op: 'images' }, 'Image revisions', 'Re-run inventory')
 }
 
 const renderRoute = payload => {
@@ -585,7 +600,11 @@ const renderRoute = payload => {
   if (summary) summary.hidden = hash === '#/host'
   for (const [id, selected] of [['nav-services', !images && hash !== '#/host'], ['nav-host', hash === '#/host'], ['nav-images', images]]) {
     const link = document.querySelector(`#${id}`)
-    if (link) link.className = selected ? 'active' : ''
+    if (link) {
+      link.className = selected ? 'active' : ''
+      if (selected) link.setAttribute('aria-current', 'page')
+      else link.removeAttribute('aria-current')
+    }
   }
   if (renderedRoute === hash && detail && !hash.endsWith('/overview') &&
     (images || (payload.projects || []).some(item => item.name === match[1]))) return
@@ -595,7 +614,10 @@ const renderRoute = payload => {
   else { ++readGeneration; readViewEl.replaceChildren() }
 }
 
-if (typeof window !== 'undefined') window.addEventListener('hashchange', () => { if (lastPayload) renderRoute(lastPayload) })
+if (typeof window !== 'undefined') window.addEventListener('hashchange', () => {
+  window.scrollTo(0, 0)
+  if (lastPayload) renderRoute(lastPayload)
+})
 
 const load = async () => {
   refreshEl.disabled = true
