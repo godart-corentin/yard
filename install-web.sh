@@ -22,6 +22,9 @@ AUTH_USER="${YARD_WEB_USER:-}"
 
 command -v docker >/dev/null || die "docker not found"
 command -v python3 >/dev/null || die "python3 not found"
+command -v systemctl >/dev/null || die "systemd is required for the local read executor"
+command -v yard >/dev/null || die "install the updated Yard CLI first"
+yard read-server --help >/dev/null 2>&1 || die "installed Yard CLI lacks the read-only executor; run install.sh first"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin unavailable"
 
 # Prefer the source checkout when install-web.sh is run from the Yard repo.
@@ -124,6 +127,7 @@ services:
       YARD_WEB_STATIC: "/opt/yard/static"
       YARD_WEB_CHECK_TIMEOUT_SECONDS: "4"
       YARD_WEB_CACHE_SECONDS: "15"
+      YARD_WEB_READ_SOCKET: "/run/yard-web-read/read.sock"
     volumes:
       - type: bind
         source: /etc/yard/projects
@@ -132,6 +136,10 @@ services:
       - type: bind
         source: /var/lib/yard
         target: /var/lib/yard
+        read_only: true
+      - type: bind
+        source: /run/yard-web-read
+        target: /run/yard-web-read
         read_only: true
     read_only: true
     tmpfs:
@@ -246,6 +254,13 @@ if [[ -f "$YARD_COMPOSE" ]]; then
 fi
 
 install -o root -g root -m 0644 "$TMP_COMPOSE" "$YARD_COMPOSE"
+
+# Only the allowlisted host reader has Docker access; Web gets a local socket.
+install -o root -g root -m 0644 "${WEB_SOURCE}/yard-web-read.service" /etc/systemd/system/yard-web-read.service
+systemctl daemon-reload
+systemctl enable --now yard-web-read.service
+systemctl restart yard-web-read.service
+[[ -S /run/yard-web-read/read.sock ]] || die "read executor socket unavailable"
 
 # The Caddyfile is bind-mounted as a single file. Replacing it with rename/install
 # changes the inode and leaves the running container attached to the old file.

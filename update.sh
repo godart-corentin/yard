@@ -10,6 +10,15 @@ else
 fi
 
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq 'yard-web'; then
+  if [[ ! -f /etc/systemd/system/yard-web-read.service ]]; then
+    echo "Yard Web read-only executor is not installed. Run install-web.sh to migrate the deployment."
+    exit 0
+  fi
+  if [[ "${EUID}" -eq 0 ]]; then
+    systemctl restart yard-web-read.service
+  else
+    sudo systemctl restart yard-web-read.service
+  fi
   if [[ -f /opt/yard/docker-compose.yml ]] \
     && grep -q '^[[:space:]]*build:' /opt/yard/docker-compose.yml
   then

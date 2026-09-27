@@ -8,6 +8,11 @@ const refreshEl = document.querySelector('#refresh')
 const hostMetricsEl = document.querySelector('#host-metrics')
 const hostBadgeEl = document.querySelector('#host-badge')
 const hostAgeEl = document.querySelector('#host-age')
+const readViewEl = document.querySelector('#read-view')
+const dashboardViewEl = document.querySelector('#dashboard-view')
+let lastPayload = null
+let readGeneration = 0
+let renderedRoute = null
 
 const labels = {
   operational: 'Operational',
@@ -166,7 +171,10 @@ const renderProject = (project, containers) => {
   header.className = 'service-header'
   const name = document.createElement('h2')
   name.className = 'service-name'
-  name.textContent = project.name || 'Unnamed service'
+  const projectLink = document.createElement('a')
+  projectLink.href = `#/project/${encodeURIComponent(project.name)}/overview`
+  projectLink.textContent = project.name || 'Unnamed service'
+  name.append(projectLink)
   header.append(name, statusBadge(serviceState(project, containers)))
 
   const endpoints = document.createElement('div')
@@ -349,6 +357,7 @@ const updateSummary = (payload, containers) => {
 }
 
 const render = (payload) => {
+  lastPayload = payload
   renderHost(payload.host)
   const projects = Array.isArray(payload.projects) ? payload.projects : []
   const snapshot = payload.host?.status === 'available' ? payload.host.snapshot : null
@@ -363,6 +372,7 @@ const render = (payload) => {
     empty.setAttribute('role', 'status')
     empty.textContent = 'No Yard services found.'
     projectsEl.append(empty)
+    renderRoute(payload)
     return
   }
 
@@ -375,9 +385,11 @@ const render = (payload) => {
     notice.textContent = snapshot.containers_message
     projectsEl.append(notice)
   }
+  renderRoute(payload)
 }
 
 const renderError = (error) => {
+  lastPayload = null
   renderHost(null)
   totalCountEl.textContent = '—'
   operationalCountEl.textContent = '—'
@@ -395,7 +407,195 @@ const renderError = (error) => {
   empty.setAttribute('role', 'alert')
   empty.textContent = error instanceof Error ? error.message : String(error)
   projectsEl.append(empty)
+  if (readViewEl) {
+    readViewEl.replaceChildren()
+    readViewEl.hidden = false
+    readViewEl.textContent = 'Status unavailable. Read views cannot be loaded.'
+  }
 }
+
+const element = (tag, className, text) => {
+  const node = document.createElement(tag)
+  node.className = className
+  if (text != null) node.textContent = text
+  return node
+}
+
+const readLink = (label, href, active = false) => {
+  const link = element('a', active ? 'active' : '', label)
+  link.href = href
+  return link
+}
+
+const readPanel = (title, subtitle) => {
+  const panel = element('section', 'read-panel')
+  panel.append(element('h2', '', title), element('p', 'read-caption', subtitle))
+  return panel
+}
+
+const readOutput = (panel, params) => {
+  const output = element('pre', 'read-output', 'Loading real host data…')
+  output.setAttribute('role', 'status')
+  panel.append(output)
+  const generation = ++readGeneration
+  fetch(`/api/read?${new URLSearchParams(params)}`, { cache: 'no-store' }).then(async response => {
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || `Read failed (HTTP ${response.status})`)
+    return data
+  }).then(data => {
+    if (generation === readGeneration) output.textContent = data.output || 'No output returned.'
+  }).catch(error => {
+    if (generation === readGeneration) {
+      output.className = 'read-output read-error'
+      output.textContent = error.message || 'Read unavailable'
+    }
+  })
+}
+
+const renderReadView = (payload, name, tab) => {
+  if (!readViewEl) return
+  ++readGeneration
+  readViewEl.replaceChildren()
+  const project = (payload.projects || []).find(item => item.name === name)
+  if (!project) {
+    readViewEl.append(element('p', 'read-error', 'Project not found in the current Yard inventory.'))
+    return
+  }
+  readViewEl.append(readLink('← All services', '#/services'))
+  const heading = element('div', 'read-heading')
+  heading.append(element('h1', '', name), statusBadge(project.status))
+  readViewEl.append(heading, element('p', 'read-meta', `Health: ${project.health_url || 'Not configured'} · Release: ${project.release?.tag || 'not recorded'}`))
+  const monitor = project.url_monitor === true
+  if (monitor) {
+    const panel = readPanel('URL monitor', 'No deployment actions: this project only checks an HTTP URL.')
+    panel.append(element('p', '', `Status: ${labels[project.status] || 'Unknown'} · HTTP ${project.http_status || 'unavailable'} · ${project.latency_ms == null ? 'latency unavailable' : `${project.latency_ms} ms`}`))
+    if (project.error) panel.append(element('p', 'read-error', project.error))
+    readViewEl.append(panel)
+    return
+  }
+  const tabs = element('nav', 'read-tabs')
+  tabs.setAttribute('aria-label', 'Project views')
+  for (const [key, label] of [['overview', 'Overview'], ['logs', 'Logs'], ['restore-points', 'Restore points'], ['restore-log', 'Restore log']]) {
+    tabs.append(readLink(label, `#/project/${encodeURIComponent(name)}/${key}`, tab === key))
+  }
+  readViewEl.append(tabs)
+  const grid = element('div', 'read-layout')
+  const content = element('div', 'read-main')
+  const operations = readPanel('Operations', 'Only allowlisted read commands in this lot.')
+  operations.className = 'read-panel read-operations'
+  for (const [label, command, target] of [
+    ['Logs', `yard logs ${name} --no-follow`, 'logs'],
+    ['Restore points', `yard restore-points ${name}`, 'restore-points'],
+    ['Restore log', `yard restore-log ${name}`, 'restore-log']
+  ]) {
+    const row = element('div', 'read-operation')
+    row.append(element('strong', '', label), element('code', '', command), readLink('Open', `#/project/${encodeURIComponent(name)}/${target}`))
+    operations.append(row)
+  }
+  operations.append(element('p', 'read-note', 'Deploy, backup, restore, prune and host collection are unavailable here.'))
+  if (tab === 'overview') {
+    const panel = readPanel('Status', 'Current HTTP health and recorded Yard state · /api/status')
+    const containers = payload.host?.status === 'available' ? payload.host.snapshot?.containers || [] : []
+    panel.append(renderProject(project, containers.filter(item => item.project === name)))
+    content.append(panel)
+  } else if (tab === 'logs') {
+    const panel = readPanel('Application logs', `yard logs ${name} --no-follow · one-shot reading, no live stream`)
+    const form = element('form', 'read-filters')
+    const serviceLabel = element('label', '', 'Service')
+    const service = element('select', 'read-service')
+    const all = element('option', '', 'All application services')
+    all.value = ''
+    service.append(all)
+    for (const value of project.application_services || []) {
+      const option = element('option', '', value)
+      option.value = value
+      service.append(option)
+    }
+    serviceLabel.append(service)
+    const tailLabel = element('label', '', 'Tail')
+    const tail = element('select', 'read-tail')
+    for (const value of [50, 100, 200, 500, 1000]) {
+      const option = element('option', '', `${value} lines`)
+      option.value = String(value)
+      tail.append(option)
+    }
+    tail.value = '200'
+    tailLabel.append(tail)
+    const sinceLabel = element('label', '', 'Since (duration or timestamp)')
+    const since = element('input', 'read-since')
+    since.maxLength = 40
+    since.placeholder = '2h or 2026-09-24T08:00:00Z'
+    sinceLabel.append(since)
+    const button = element('button', 'read-button', 'Load logs')
+    button.type = 'submit'
+    form.append(serviceLabel, tailLabel, sinceLabel, button)
+    panel.append(form, element('p', 'read-note', 'Only configured application services; at most 1000 lines and 128 KiB. Follow is not available.'))
+    const request = () => {
+      const params = { op: 'logs', project: name, tail: tail.value }
+      if (service.value) params.service = service.value
+      if (since.value?.trim()) params.since = since.value.trim()
+      panel.querySelector?.('.read-output')?.remove()
+      readOutput(panel, params)
+    }
+    form.addEventListener('submit', event => { event.preventDefault(); request() })
+    content.append(panel)
+    request()
+  } else if (tab === 'restore-points' || tab === 'restore-log') {
+    const title = tab === 'restore-points' ? 'Recorded releases and backup attempts' : 'Restore attempt journal'
+    const panel = readPanel(title, `yard ${tab} ${name} · read-only output from the host`)
+    if (tab === 'restore-points') panel.append(element('p', 'read-note', 'Only recorded application releases. Backup destinations are descriptive metadata, not restorable data targets.'))
+    readOutput(panel, { op: tab, project: name })
+    content.append(panel)
+  } else {
+    content.append(element('p', 'read-error', 'Unknown project view.'))
+  }
+  grid.append(content, operations)
+  readViewEl.append(grid)
+}
+
+const renderImagesView = () => {
+  if (!readViewEl) return
+  ++readGeneration
+  readViewEl.replaceChildren()
+  const panel = readPanel('Image revisions', 'yard images · global read-only inventory of protected, in-use and reclaimable revisions')
+  panel.append(element('p', 'read-note', 'Inventory fails closed when release state or Docker inspection is unavailable. Prune is CLI-only and removes all eligible candidates, never a selection.'))
+  const button = element('button', 'read-button', 'Re-run inventory')
+  button.addEventListener('click', () => {
+    panel.querySelector?.('.read-output')?.remove()
+    readOutput(panel, { op: 'images' })
+  })
+  panel.append(button)
+  readViewEl.append(panel)
+  readOutput(panel, { op: 'images' })
+}
+
+const renderRoute = payload => {
+  if (!readViewEl || !dashboardViewEl || typeof location === 'undefined') return
+  const hash = location.hash || '#/services'
+  const match = /^#\/project\/([A-Za-z0-9_-]{1,64})\/(overview|logs|restore-points|restore-log)$/.exec(hash)
+  const images = hash === '#/images'
+  const detail = images || Boolean(match)
+  readViewEl.hidden = !detail
+  dashboardViewEl.hidden = detail
+  const host = document.querySelector('#host-section')
+  if (host) host.hidden = false
+  const services = document.querySelector('#services-section')
+  if (services) services.hidden = hash === '#/host'
+  const summary = document.querySelector('.summary')
+  if (summary) summary.hidden = hash === '#/host'
+  for (const [id, selected] of [['nav-services', !images && hash !== '#/host'], ['nav-host', hash === '#/host'], ['nav-images', images]]) {
+    const link = document.querySelector(`#${id}`)
+    if (link) link.className = selected ? 'active' : ''
+  }
+  if (renderedRoute === hash && detail && !hash.endsWith('/overview') &&
+    (images || (payload.projects || []).some(item => item.name === match[1]))) return
+  renderedRoute = hash
+  if (images) renderImagesView()
+  else if (match) renderReadView(payload, match[1], match[2])
+  else { ++readGeneration; readViewEl.replaceChildren() }
+}
+
+if (typeof window !== 'undefined') window.addEventListener('hashchange', () => { if (lastPayload) renderRoute(lastPayload) })
 
 const load = async () => {
   refreshEl.disabled = true
@@ -413,6 +613,6 @@ const load = async () => {
   }
 }
 
-refreshEl.addEventListener('click', load)
+refreshEl.addEventListener('click', () => { renderedRoute = null; load() })
 load()
 setInterval(load, 30_000)

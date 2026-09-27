@@ -29,7 +29,10 @@ fi
 
 "${SUDO[@]}" install -d -m 755 /etc/yard/projects
 "${SUDO[@]}" install -d -m 755 /var/lib/yard
-"${SUDO[@]}" install -m 755 "$ROOT_DIR/target/release/yard" /usr/local/bin/yard
+# Replace atomically: the read executor may keep the previous binary open until
+# update.sh restarts its service. In-place overwrite would fail with ETXTBSY.
+"${SUDO[@]}" install -m 755 "$ROOT_DIR/target/release/yard" /usr/local/bin/.yard.new
+"${SUDO[@]}" mv -f /usr/local/bin/.yard.new /usr/local/bin/yard
 
 "${SUDO[@]}" install -d -o root -g root -m 755 /usr/local/share/yard
 "${SUDO[@]}" rm -rf /usr/local/share/yard/web-src

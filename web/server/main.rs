@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,6 +23,7 @@ struct Config {
     check_timeout: Duration,
     cache_duration: Duration,
     host_max_age_seconds: u64,
+    read_socket: PathBuf,
 }
 
 impl Config {
@@ -38,6 +40,10 @@ impl Config {
             )?),
             cache_duration: Duration::from_secs_f64(env_number("YARD_WEB_CACHE_SECONDS", 15.0)?),
             host_max_age_seconds: env_number("YARD_WEB_HOST_MAX_AGE_SECONDS", 300)?,
+            read_socket: PathBuf::from(env_value(
+                "YARD_WEB_READ_SOCKET",
+                "/run/yard-web-read/read.sock",
+            )),
         })
     }
 }
@@ -111,6 +117,7 @@ struct Project {
     health_url: Option<String>,
     has_service_probes: bool,
     service_names: Vec<String>,
+    url_monitor: bool,
     release: Option<Value>,
     pending_release: Option<Value>,
     last_backup: Option<BackupRecord>,
@@ -122,6 +129,8 @@ struct Project {
 #[derive(Clone, Debug, Serialize)]
 struct ProjectStatus {
     name: String,
+    application_services: Vec<String>,
+    url_monitor: bool,
     health_url: Option<String>,
     services: Vec<ServiceHealth>,
     #[serde(skip)]
@@ -407,6 +416,7 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             Some(match parsed {
                 Ok(config) => Project {
                     name,
+                    url_monitor: config.compose.is_none(),
                     has_service_probes: config.service_health.as_ref().is_some_and(|probes| {
                         probes.as_table().is_some_and(|table| !table.is_empty())
                     }),
@@ -452,6 +462,7 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                 },
                 Err(error) => Project {
                     name,
+                    url_monitor: false,
                     health_url: None,
                     has_service_probes: false,
                     service_names: vec![],
@@ -547,6 +558,8 @@ fn check_projects(projects: Vec<Project>, client: &Client) -> Vec<ProjectStatus>
 fn check_project(project: Project, client: &Client) -> ProjectStatus {
     let mut result = ProjectStatus {
         name: project.name.clone(),
+        application_services: project.service_names.clone(),
+        url_monitor: project.url_monitor,
         health_url: project.health_url,
         services: project
             .service_names
@@ -618,7 +631,6 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
             }
         }
         Err(error) => {
-            result.latency_ms = Some(started.elapsed().as_millis());
             result.status = "down".to_owned();
             result.error = Some(error.to_string());
         }
@@ -749,6 +761,143 @@ fn format_unix_utc(seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+// A second, deliberately small allowlist in Web. The executor independently validates
+// the same operation and project against the real Yard manifest before spawning Yard.
+fn read_request(target: &str, config: &Config) -> Option<Value> {
+    let url = reqwest::Url::parse(&format!("http://localhost{target}")).ok()?;
+    if url.path() != "/api/read" || !target.starts_with("/api/read?") {
+        return None;
+    }
+    let mut params = std::collections::BTreeMap::new();
+    for (key, value) in url.query_pairs() {
+        if !matches!(
+            key.as_ref(),
+            "op" | "project" | "service" | "tail" | "since"
+        ) || params
+            .insert(key.into_owned(), value.into_owned())
+            .is_some()
+        {
+            return None;
+        }
+    }
+    let op = params.remove("op")?;
+    if op == "images" {
+        return params
+            .is_empty()
+            .then(|| serde_json::json!({"op": "images"}));
+    }
+    if !matches!(op.as_str(), "logs" | "restore-points" | "restore-log") {
+        return None;
+    }
+    let project = params.remove("project")?;
+    if project.is_empty()
+        || project.len() > 64
+        || !project
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let loaded = load_projects(&config.projects_dir, &config.state_dir);
+    let selected = loaded.iter().find(|item| item.name == project)?;
+    if selected.service_names.is_empty() || selected.config_error.is_some() {
+        return None;
+    }
+    if op != "logs" {
+        return params
+            .is_empty()
+            .then(|| serde_json::json!({"op": op, "project": project}));
+    }
+    let service = params.remove("service");
+    if service
+        .as_deref()
+        .is_some_and(|name| !selected.service_names.iter().any(|valid| valid == name))
+    {
+        return None;
+    }
+    let tail = params
+        .remove("tail")
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .ok()?;
+    if tail.is_some_and(|count| count == 0 || count > 1000) {
+        return None;
+    }
+    let since = params.remove("since");
+    if since.as_deref().is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 40
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'T' | b'Z' | b'+' | b'-' | b':' | b'.' | b's' | b'm' | b'h' | b'd'
+                    )
+            })
+    }) {
+        return None;
+    }
+    params.is_empty().then(|| serde_json::json!({"op": op, "project": project, "service": service, "tail": tail, "since": since}))
+}
+
+fn read_result(socket: &Path, request: &Value) -> Result<Value, u16> {
+    let mut stream = UnixStream::connect(socket).map_err(|_| 503u16)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(13)))
+        .map_err(|_| 503u16)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| 503u16)?;
+    serde_json::to_writer(&mut stream, request).map_err(|_| 503u16)?;
+    stream.write_all(b"\n").map_err(|_| 503u16)?;
+    let mut bytes = Vec::new();
+    stream
+        .take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map_err(|_| 503u16)?;
+    if bytes.len() > 1_048_576 {
+        return Err(502);
+    }
+    let reply: Value = serde_json::from_slice(&bytes).map_err(|_| 502u16)?;
+    if let Some(output) = reply.get("output").and_then(Value::as_str) {
+        return (output.len() <= 131_072)
+            .then(|| serde_json::json!({"output": output}))
+            .ok_or(502);
+    }
+    match reply.get("error").and_then(Value::as_str) {
+        Some("Read operation refused") => Err(400),
+        Some(_) => Err(502),
+        None => Err(502),
+    }
+}
+
+fn serve_read(stream: &mut TcpStream, target: &str, app: &App) -> Result<(), String> {
+    let request = read_request(target, &app.config);
+    let result = request
+        .ok_or(400)
+        .and_then(|request| read_result(&app.config.read_socket, &request));
+    let (status, body) = match result {
+        Ok(value) => (200, value),
+        Err(400) => (400, serde_json::json!({"error": "Read operation refused"})),
+        Err(503) => (
+            503,
+            serde_json::json!({"error": "Read executor unavailable"}),
+        ),
+        Err(_) => (
+            502,
+            serde_json::json!({"error": "Read operation failed or output limit exceeded"}),
+        ),
+    };
+    let bytes = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
+    write_response(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        &bytes,
+        "no-store",
+    )
+}
+
 fn serve(app: Arc<App>) -> Result<(), String> {
     let address = format!("{}:{}", app.config.host, app.config.port);
     let listener = TcpListener::bind(&address)
@@ -817,12 +966,8 @@ fn handle_connection(mut stream: TcpStream, app: &App) -> Result<(), String> {
 
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
-    let path = parts
-        .next()
-        .unwrap_or_default()
-        .split('?')
-        .next()
-        .unwrap_or("/");
+    let target = parts.next().unwrap_or_default();
+    let path = target.split('?').next().unwrap_or("/");
     if method != "GET" {
         return write_response(
             &mut stream,
@@ -834,6 +979,7 @@ fn handle_connection(mut stream: TcpStream, app: &App) -> Result<(), String> {
     }
 
     match path {
+        "/api/read" => serve_read(&mut stream, target, app),
         "/healthz" => write_response(
             &mut stream,
             200,
@@ -903,6 +1049,9 @@ fn write_response(
 ) -> Result<(), String> {
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
         404 => "Not Found",
         405 => "Method Not Allowed",
         414 => "URI Too Long",
@@ -972,6 +1121,8 @@ mod tests {
     fn project(status: &str) -> ProjectStatus {
         ProjectStatus {
             name: "test".to_owned(),
+            application_services: vec![],
+            url_monitor: false,
             health_url: None,
             services: vec![],
             uses_service_probes: false,
@@ -1133,6 +1284,7 @@ mod tests {
             Project {
                 name: "hello".to_owned(),
                 health_url: None,
+                url_monitor: false,
                 has_service_probes: false,
                 service_names: vec![],
                 release: None,
@@ -1155,6 +1307,7 @@ mod tests {
             Project {
                 name: "demo".to_owned(),
                 health_url: None,
+                url_monitor: false,
                 has_service_probes: false,
                 service_names: vec!["api".to_owned()],
                 release: None,
@@ -1210,6 +1363,7 @@ mod tests {
             Project {
                 name: "broken".to_owned(),
                 health_url: None,
+                url_monitor: false,
                 has_service_probes: false,
                 service_names: vec![],
                 release: None,
@@ -1247,6 +1401,7 @@ mod tests {
             Project {
                 name: "hello".to_owned(),
                 health_url: Some(format!("http://{address}/health")),
+                url_monitor: false,
                 has_service_probes: false,
                 service_names: vec![],
                 release: None,
@@ -1343,6 +1498,7 @@ mod tests {
             check_timeout: Duration::from_secs(1),
             cache_duration: Duration::from_secs(60),
             host_max_age_seconds: 300,
+            read_socket: dir.join("missing.sock"),
         };
         let app = App::new(config).unwrap();
         assert_eq!(app.status().host.status, "unknown");
@@ -1454,6 +1610,7 @@ mod tests {
             check_timeout: Duration::from_secs(1),
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
+            read_socket: dir.join("missing.sock"),
         })
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1495,5 +1652,135 @@ mod tests {
         assert_eq!(payload["status"], "degraded");
         assert!(!exposed.contains_key("secret"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_api_rejects_mutations_and_invalid_parameters_without_contacting_executor() {
+        let dir = temp_dir("read-route");
+        fs::write(dir.join("demo.toml"), "[compose]\nservice = 'api'\n").unwrap();
+        let app = App::new(Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects_dir: dir.clone(),
+            state_dir: dir.clone(),
+            static_dir: dir.clone(),
+            check_timeout: Duration::from_secs(1),
+            cache_duration: Duration::from_secs(1),
+            host_max_age_seconds: 300,
+            read_socket: dir.join("missing.sock"),
+        })
+        .unwrap();
+        for path in [
+            "/api/read?op=deploy&project=demo",
+            "/api/read?op=images&prune=true",
+            "/api/read?op=restore-points&project=..%2Fdemo",
+            "/api/read?op=logs&project=demo&tail=999999",
+            "/api/read?op=logs&project=demo&since=2h%3Bwhoami",
+            "/api/read?op=restore-log&project=demo&project=demo",
+            "/api/read?op=images&binary=sh",
+        ] {
+            assert!(
+                read_api_http(&app, path).starts_with("HTTP/1.1 400"),
+                "{path}"
+            );
+        }
+        assert!(read_api_http(&app, "/api/read?op=images").starts_with("HTTP/1.1 503"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn status_identifies_monitors_and_configured_services_without_a_deployment() {
+        let dir = temp_dir("read-inventory");
+        fs::write(
+            dir.join("demo.toml"),
+            "[compose]\nservices = ['api', 'worker']\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("monitor.toml"),
+            "[deployment]\nhealth_url = 'http://127.0.0.1:1/health'\n",
+        )
+        .unwrap();
+        let projects = load_projects(&dir, &dir);
+        let demo = serde_json::to_value(check_project(
+            projects.iter().find(|p| p.name == "demo").unwrap().clone(),
+            &Client::new(),
+        ))
+        .unwrap();
+        let monitor = serde_json::to_value(check_project(
+            projects.into_iter().find(|p| p.name == "monitor").unwrap(),
+            &Client::builder()
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            demo["application_services"],
+            serde_json::json!(["api", "worker"])
+        );
+        assert_eq!(demo["url_monitor"], false);
+        assert_eq!(monitor["url_monitor"], true);
+        assert_eq!(monitor["application_services"], serde_json::json!([]));
+        assert!(
+            monitor["latency_ms"].is_null(),
+            "failed HTTP checks have no response latency"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_api_forwards_only_inventory_and_sanitizes_executor_output() {
+        use std::os::unix::net::UnixListener;
+        let dir = temp_dir("read-success");
+        let socket = dir.join("read.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let app = App::new(Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects_dir: dir.clone(),
+            state_dir: dir.clone(),
+            static_dir: dir.clone(),
+            check_timeout: Duration::from_secs(1),
+            cache_duration: Duration::from_secs(1),
+            host_max_age_seconds: 300,
+            read_socket: socket.clone(),
+        })
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap(),
+                serde_json::json!({"op":"images"})
+            );
+            (&stream).write_all(b"{\"output\":\"Project: demo\\n  keep image:abc\\n\",\"secret\":\"private\"}\n").unwrap();
+        });
+        let response = read_api_http(&app, "/api/read?op=images");
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("Project: demo"));
+        assert!(!response.contains("private"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn read_api_http(app: &App, path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (stream, _) = listener.accept().unwrap();
+                handle_connection(stream, app).unwrap();
+            });
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            server.join().unwrap();
+            response
+        })
     }
 }

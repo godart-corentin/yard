@@ -246,7 +246,7 @@ Each CLI collection atomically replaces `host.json` in the state directory (`--s
 
 ## Yard Web
 
-Yard Web is an optional private dashboard for the projects already registered in Yard.
+Yard Web is an optional private dashboard for the projects already registered in Yard. Its project views now provide bounded, one-shot application logs (`service`, `tail` up to 1000, `since`), recorded restore points, the restore attempt journal, and the global image inventory. These are **read-only**: following logs, deploy, backup, restore, prune, and host collection remain CLI-only. `yard images --prune --yes` always prunes all eligible candidates, never a selected subset.
 
 It reads:
 
@@ -281,6 +281,8 @@ The installer:
 7. validates and reloads Caddy;
 8. waits for `yard-web` to become healthy.
 
+The installer also requires systemd and the updated Yard CLI. It starts a sandboxed host-side `yard-web-read.service` on a group-restricted Unix socket under `/run/yard-web-read`. The host process needs access to Docker and Yard's private state to perform these reads; the Web container receives only a read-only bind of the socket directory and retains its read-only manifest/state mounts, without Docker socket access. This service runs with host privileges to read existing mode-0600 state and Compose environment files; treat the Web Basic Auth credentials and host executor as sensitive operational access. The Web endpoint and the executor both independently reject all commands outside their read allowlists.
+
 If Caddy network discovery is ambiguous, choose one explicitly:
 
 ```bash
@@ -304,6 +306,10 @@ Yard Web exposes these endpoints inside its Docker network:
 ```text
 GET /healthz
 GET /api/status
+GET /api/read?op=images
+GET /api/read?op=logs&project=hello-api&service=api&tail=200&since=2h
+GET /api/read?op=restore-points&project=hello-api
+GET /api/read?op=restore-log&project=hello-api
 ```
 
 The browser refreshes automatically, while the server briefly caches health results to avoid duplicate checks.

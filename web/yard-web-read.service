@@ -1,0 +1,34 @@
+# Yard Web read-only executor; the only writable mount is its local socket directory.
+[Unit]
+Description=Yard Web allowlisted host reader
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=65532
+UMask=0007
+RuntimeDirectory=yard-web-read
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/yard read-server --socket /run/yard-web-read/read.sock
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/yard-web-read
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
