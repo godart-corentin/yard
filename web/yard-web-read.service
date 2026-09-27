@@ -7,7 +7,7 @@ Requires=docker.service
 [Service]
 Type=simple
 User=root
-Group=65532
+Group=yard-web-read
 UMask=0007
 RuntimeDirectory=yard-web-read
 RuntimeDirectoryMode=0750

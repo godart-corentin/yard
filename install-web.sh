@@ -37,6 +37,7 @@ elif [[ -f "${INSTALLED_WEB_SOURCE}/Dockerfile" ]]; then
 else
   die "Yard Web source not found next to install-web.sh or in ${INSTALLED_WEB_SOURCE}"
 fi
+source "${WEB_SOURCE}/install-read.sh"
 
 [[ -d /etc/yard/projects ]] || die "/etc/yard/projects does not exist; install Yard first"
 [[ -d /var/lib/yard ]] || die "/var/lib/yard does not exist; install Yard first"
@@ -99,6 +100,7 @@ echo "Yard Web source: ${WEB_SOURCE}"
 echo "Yard Web will use Caddy network: ${PROXY_NETWORK}"
 
 STATE_GID="$(stat -c '%g' /var/lib/yard)"
+READ_GROUP_GID="$(read_group_gid)" || die "cannot provision dedicated read executor group"
 mkdir -p "$YARD_ROOT"
 
 TMP_DIR="$(mktemp -d)"
@@ -119,6 +121,7 @@ services:
     user: "65532:65532"
     group_add:
       - "${STATE_GID}"
+      - "${READ_GROUP_GID}"
     environment:
       YARD_WEB_HOST: "0.0.0.0"
       YARD_WEB_PORT: "8088"
@@ -257,10 +260,8 @@ install -o root -g root -m 0644 "$TMP_COMPOSE" "$YARD_COMPOSE"
 
 # Only the allowlisted host reader has Docker access; Web gets a local socket.
 install -o root -g root -m 0644 "${WEB_SOURCE}/yard-web-read.service" /etc/systemd/system/yard-web-read.service
-systemctl daemon-reload
-systemctl enable --now yard-web-read.service
-systemctl restart yard-web-read.service
-[[ -S /run/yard-web-read/read.sock ]] || die "read executor socket unavailable"
+start_read_service
+wait_read_socket /run/yard-web-read/read.sock
 
 # The Caddyfile is bind-mounted as a single file. Replacing it with rename/install
 # changes the inode and leaves the running container attached to the old file.
