@@ -15,6 +15,7 @@ use serde_json::json;
 use crate::error::{Result, YardError};
 use crate::monitor::Monitor;
 use crate::project::Project;
+use crate::status;
 
 const MAX_REQUEST: u64 = 1024;
 const MAX_OUTPUT: u64 = 128 * 1024;
@@ -197,12 +198,21 @@ fn handle(mut stream: UnixStream, projects: &Path, state: &Path) -> std::io::Res
     let answer = if read as u64 > MAX_REQUEST || !bytes.ends_with(b"\n") {
         json!({"error": "Read operation refused"})
     } else if let Ok(request) = serde_json::from_slice::<ReadRequest>(&bytes) {
-        match allowed(&request, projects) {
-            Some(args) => match execute(&args, projects, state) {
-                Ok(output) => json!({"output": output}),
-                Err(error) => json!({"error": error}),
-            },
-            None => json!({"error": "Read operation refused"}),
+        if request.op == "diagnostics"
+            && request.project.is_none()
+            && request.service.is_none()
+            && request.tail.is_none()
+            && request.since.is_none()
+        {
+            json!({"diagnostics": status::web_diagnostics(projects, state)})
+        } else {
+            match allowed(&request, projects) {
+                Some(args) => match execute(&args, projects, state) {
+                    Ok(output) => json!({"output": output}),
+                    Err(error) => json!({"error": error}),
+                },
+                None => json!({"error": "Read operation refused"}),
+            }
         }
     } else {
         json!({"error": "Read operation refused"})

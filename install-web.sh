@@ -128,7 +128,7 @@ services:
       YARD_PROJECTS_DIR: "/etc/yard/projects"
       YARD_STATE_DIR: "/var/lib/yard"
       YARD_WEB_STATIC: "/opt/yard/static"
-      YARD_WEB_CHECK_TIMEOUT_SECONDS: "4"
+      YARD_WEB_CHECK_TIMEOUT_SECONDS: "5"
       YARD_WEB_CACHE_SECONDS: "15"
       YARD_WEB_READ_SOCKET: "/run/yard-web-read/read.sock"
     volumes:
