@@ -630,7 +630,13 @@ if (typeof window !== 'undefined') window.addEventListener('popstate', () => {
   // History traversal can restore the entry's scroll after popstate; leave native
   // restoration enabled, then override it only for a changed application route.
   setTimeout(() => {
-    if (location.hash === hash) window.scrollTo(0, 0)
+    if (location.hash !== hash) return
+    window.scrollTo(0, 0)
+    // Chromium can restore the history entry after the zero-delay task. Correct
+    // that restoration at the next paint without changing same-route refreshes.
+    requestAnimationFrame(() => {
+      if (location.hash === hash) window.scrollTo(0, 0)
+    })
   }, 0)
 })
 
