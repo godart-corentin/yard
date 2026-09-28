@@ -65,6 +65,7 @@ function browser (fetchRead = () => new Promise(() => {})) {
   const listeners = {}
   const scrolls = []
   const deferred = []
+  const frames = []
   let scrollY = 0
   let interval
   const location = { hash: '#/services' }
@@ -72,7 +73,8 @@ function browser (fetchRead = () => new Promise(() => {})) {
     document: { querySelector: selector => nodes[selector.startsWith('#') ? selector.slice(1) : selector], createElement: tag => new Element(tag) },
     window: { addEventListener: (name, handler) => { listeners[name] = handler }, scrollTo: (...args) => { scrolls.push(args); scrollY = args[1] } },
     location, fetch: (url) => url.startsWith('/api/read') ? fetchRead(url) : Promise.resolve({ ok: true, json: async () => payload }),
-    setInterval: callback => { interval = callback }, setTimeout: callback => { deferred.push(callback) }, URL, URLSearchParams
+    setInterval: callback => { interval = callback }, setTimeout: callback => { deferred.push(callback) },
+    requestAnimationFrame: callback => { frames.push(callback) }, URL, URLSearchParams
   }
   vm.runInNewContext(`${source}\nglobalThis.testAPI = { render, renderRoute, load }`, context)
   return {
@@ -84,6 +86,15 @@ function browser (fetchRead = () => new Promise(() => {})) {
       listeners.hashchange?.()
       scrollY = 350 // Browser restores the history entry after navigation listeners run.
       for (const callback of deferred.splice(0)) callback()
+      for (const callback of frames.splice(0)) callback()
+    },
+    traverseWithLateRestoration: hash => {
+      location.hash = hash
+      listeners.popstate?.()
+      listeners.hashchange?.()
+      for (const callback of deferred.splice(0)) callback()
+      scrollY = 350 // Chromium may restore the history entry after a zero-delay task.
+      for (const callback of frames.splice(0)) callback()
     },
     setScroll: y => { scrollY = y }, getScroll: () => scrollY,
     read: () => nodes['read-view'], projects: () => nodes.projects
@@ -172,6 +183,21 @@ test('Back and Forward between project overview and logs reset restored scroll',
   page.traverse('#/project/app/logs')
   assert.equal(page.getScroll(), 0)
   assert.equal(page.read().querySelector('.read-filters')?.tag, 'form')
+})
+
+test('history traversal resets native scroll restored after the zero-delay task', async () => {
+  const page = browser(async () => response(200, { output: 'logs' }))
+  await tick()
+  page.navigate('#/project/app/overview')
+  page.navigate('#/project/app/logs')
+  page.traverseWithLateRestoration('#/project/app/overview')
+  assert.equal(page.getScroll(), 0)
+  page.traverseWithLateRestoration('#/project/app/logs')
+  assert.equal(page.getScroll(), 0)
+  page.setScroll(350)
+  const resets = page.scrolls.length
+  page.traverseWithLateRestoration('#/project/app/logs')
+  assert.equal(page.scrolls.length, resets)
 })
 
 for (const view of ['images', 'logs']) {
