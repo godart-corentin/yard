@@ -54,6 +54,14 @@ impl Fixture {
     }
 
     fn health_server(&self, healthy_image: Option<&str>) -> HealthServer {
+        self.health_server_with_first_delay(healthy_image, Duration::ZERO)
+    }
+
+    fn health_server_with_first_delay(
+        &self,
+        healthy_image: Option<&str>,
+        first_delay: Duration,
+    ) -> HealthServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/health", listener.local_addr().unwrap());
@@ -67,8 +75,12 @@ impl Fixture {
             while !done.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        count.fetch_add(1, Ordering::Relaxed);
+                        let request = count.fetch_add(1, Ordering::Relaxed);
                         if let Ok(log) = fs::read(root.join("docker.log")) {
+                            if request == 0 {
+                                fs::write(root.join("http-first-observed-docker.log"), &log)
+                                    .unwrap();
+                            }
                             fs::write(root.join("http-observed-docker.log"), log).unwrap();
                         }
                         if let Ok(state) = fs::read(root.join("state/demo.json")) {
@@ -83,6 +95,9 @@ impl Fixture {
                         } else {
                             "503 Service Unavailable"
                         };
+                        if request == 0 {
+                            thread::sleep(first_delay);
+                        }
                         write!(
                             stream,
                             "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -140,7 +155,12 @@ impl Fixture {
     }
 
     fn run_with_args(&self, command: &str, extra: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_yard"))
+        self.command(command, extra).output().unwrap()
+    }
+
+    fn command(&self, command: &str, extra: &[&str]) -> Command {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_yard"));
+        process
             .args([
                 "--projects-dir",
                 self.root.join("projects").to_str().unwrap(),
@@ -158,9 +178,8 @@ impl Fixture {
                     std::env::var("PATH").unwrap()
                 ),
             )
-            .env("FAKE_ROOT", &self.root)
-            .output()
-            .unwrap()
+            .env("FAKE_ROOT", &self.root);
+        process
     }
 
     fn setup_repo(&self) {
@@ -1065,9 +1084,15 @@ fn gated_http_probe_activates_release_after_images_are_checked() {
     fixture.gate(
         "api",
         &format!("type = 'http'\nurl = '{}'\ntimeout_ms = 800", server.url),
-        2,
+        1,
     );
-    let result = fixture.run("deploy");
+    // A successful request should not become Degraded under CI load (the default warn
+    // threshold is 500 ms); retries are covered by the delayed-probe test below.
+    let result = fixture
+        .command("deploy", &[])
+        .env("YARD_HTTP_WARN_MS", "5000")
+        .output()
+        .unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -1076,7 +1101,7 @@ fn gated_http_probe_activates_release_after_images_are_checked() {
     assert_eq!(server.requests.load(Ordering::Relaxed), 1);
     assert_eq!(fixture.state()["current"]["status"], "active");
     assert!(fixture.state()["pending"].is_null());
-    let log = fs::read_to_string(fixture.root.join("http-observed-docker.log")).unwrap();
+    let log = fs::read_to_string(fixture.root.join("http-first-observed-docker.log")).unwrap();
     assert!(log.contains("up -d --no-build --no-deps api"));
     assert!(log.contains("up -d --no-build --no-deps worker"));
     assert_eq!(log.matches("ps --all --format json").count(), 2);
@@ -1084,6 +1109,41 @@ fn gated_http_probe_activates_release_after_images_are_checked() {
         serde_json::from_slice(&fs::read(fixture.root.join("http-observed-state.json")).unwrap())
             .unwrap();
     assert_eq!(observed["pending"]["status"], "activating");
+}
+
+#[test]
+fn degraded_first_http_probe_retries_after_images_are_checked() {
+    let fixture = Fixture::new();
+    fixture.setup_repo();
+    fixture.repo_manifest("services = [\"api\", \"worker\"]");
+    let server = fixture.health_server_with_first_delay(None, Duration::from_millis(1200));
+    fixture.gate(
+        "api",
+        &format!("type = 'http'\nurl = '{}'\ntimeout_ms = 5000", server.url),
+        2,
+    );
+    let result = fixture
+        .command("deploy", &[])
+        .env("YARD_HTTP_WARN_MS", "1000")
+        .env("YARD_HTTP_CRIT_MS", "5000")
+        .env("RUST_LOG", "yard=debug")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
+    let diagnostics = String::from_utf8_lossy(&result.stdout);
+    assert!(diagnostics.contains("Degraded"), "{diagnostics}");
+    let first_log =
+        fs::read_to_string(fixture.root.join("http-first-observed-docker.log")).unwrap();
+    assert!(first_log.contains("up -d --no-build --no-deps api"));
+    assert!(first_log.contains("up -d --no-build --no-deps worker"));
+    assert_eq!(first_log.matches("ps --all --format json").count(), 2);
+    assert_eq!(fixture.state()["current"]["status"], "active");
+    assert!(fixture.state()["pending"].is_null());
 }
 
 #[test]
