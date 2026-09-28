@@ -69,6 +69,9 @@ const hostBadge = (status) => {
 const formatBytes = (bytes) => `${(bytes / (1024 ** 3)).toFixed(1)} GiB`
 const level = (status) => ({ critical: 3, warning: 2, unknown: 1, normal: 0 }[status] ?? 1)
 const serviceState = (project, containers) => {
+  if (project.cli?.verdict === 'alert') return 'down'
+  if (project.cli?.verdict === 'ok') return 'operational'
+  if (project.url_monitor === false) return 'unknown'
   if (project.status === 'down' || project.status === 'unhealthy') return project.status
   if (containers.some((container) => container.status === 'critical')) return 'degraded'
   return labels[project.status] ? project.status : 'unknown'
@@ -102,20 +105,23 @@ const renderHost = (host) => {
     card.append(header, detail)
     hostMetricsEl.append(card)
   }
-  // Container and Docker diagnostics remain in the API, not in the host badge.
-  const states = [snapshot.cpu.status, snapshot.memory.status,
+  // Metrics are from the dated host snapshot, not a live CLI measurement.
+  const states = [snapshot.cpu.status, snapshot.load?.status || 'unknown', snapshot.memory.status, snapshot.docker?.status || 'unknown',
     ...snapshot.disks.map((disk) => disk.status)]
   const overall = states.reduce((highest, status) => level(status) > level(highest) ? status : highest, 'normal')
   hostBadgeEl.className = `badge ${hostStatus(overall)}`
   hostBadgeEl.textContent = hostLabel(overall)
 
   addMetric('CPU', snapshot.cpu, snapshot.cpu.value == null ? null : `${snapshot.cpu.value.toFixed(1)}%`)
+  addMetric('Load (1 / 5 / 15 min)', snapshot.load, snapshot.load?.value?.join(' / '))
   const memory = snapshot.memory.value
   addMetric('RAM', snapshot.memory, memory ? `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}` : null)
   for (const disk of snapshot.disks) {
     const value = disk.value
     addMetric(`Disk ${value?.mount || ''}`, disk, value ? `${formatBytes(value.used_bytes)} / ${formatBytes(value.total_bytes)}` : null)
   }
+  const docker = snapshot.docker?.value
+  addMetric('Docker disk', snapshot.docker, docker ? `Images ${docker.images} · Containers ${docker.containers} · Volumes ${docker.volumes}` : null)
 }
 
 const externalLink = (label, value, className = '') => {
@@ -159,7 +165,7 @@ const backupDetail = (attempt) => {
   const date = toDate(attempt.started_at_unix, true)
   const age = date ? `${Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000))}s ago` : 'time unavailable'
   const result = attempt.result === 'success' ? 'Success' : attempt.result === 'failure' ? 'Failure' : 'Unknown result'
-  const destination = attempt.destination || 'unknown destination'
+  const destination = 'destination hidden'
   const duration = attempt.duration_ms == null ? '' : ` · ${attempt.duration_ms} ms`
   return `${result} · ${age} · ${destination}${duration}`
 }
@@ -200,7 +206,7 @@ const renderProject = (project, containers) => {
     : document.createElement('span')
   if (!project.health_url) {
     healthValue.className = 'endpoint-empty'
-    healthValue.textContent = 'Not configured'
+    healthValue.textContent = project.url_monitor ? 'Configured (URL hidden)' : 'URL not exposed'
   }
   healthRow.append(healthLabel, healthValue)
   endpoints.append(healthRow)
@@ -209,13 +215,13 @@ const renderProject = (project, containers) => {
   facts.className = 'service-facts'
   addFact(
     facts,
-    'Latency',
+    'Web probe latency',
     project.latency_ms == null ? '—' : `${project.latency_ms} ms`,
     'tabular'
   )
   addFact(
     facts,
-    'HTTP',
+    'Web HTTP sample',
     project.http_status == null ? '—' : String(project.http_status),
     'tabular'
   )
@@ -232,7 +238,8 @@ const renderProject = (project, containers) => {
   const releaseValue = document.createElement('div')
   releaseValue.className = 'release-value'
   const releaseTag = document.createElement('code')
-  releaseTag.textContent = release.tag || (release.revision ? shortRevision(release.revision) : 'Not recorded')
+  releaseTag.textContent = release.record_status === 'invalid' || project.state_status === 'invalid' ? 'Unreadable record'
+    : release.tag || (release.revision ? shortRevision(release.revision) : 'Not recorded')
   releaseValue.append(releaseTag)
   if (release.tag && release.revision && !String(release.revision).startsWith(String(release.tag))) {
     const releaseSha = document.createElement('span')
@@ -295,6 +302,10 @@ const renderProject = (project, containers) => {
     const label = document.createElement('h3')
     label.textContent = 'Containers'
     group.append(label)
+    const notice = document.createElement('p')
+    notice.className = 'read-note'
+    notice.textContent = 'Host snapshot only — not a live Compose diagnosis.'
+    group.append(notice)
     for (const container of containers) {
       const row = document.createElement('div')
       row.className = 'container-row'
@@ -319,7 +330,7 @@ const renderProject = (project, containers) => {
     }
     card.append(images)
   }
-  if (project.pending_release) {
+  if (project.pending_release?.record_status === 'recorded') {
     const pending = document.createElement('p')
     pending.className = 'service-error'
     pending.textContent = `Release ${project.pending_release.tag || '—'} ${project.pending_release.status || 'activating'} — Docker state may differ; run yard status and yard rollback.`
@@ -332,6 +343,21 @@ const renderProject = (project, containers) => {
     error.textContent = project.error
     card.append(error)
   }
+
+  const diagnostics = document.createElement('dl')
+  diagnostics.className = 'service-facts cli-diagnostics'
+  const cli = project.cli
+  addFact(diagnostics, 'CLI overview', cli ? (cli.verdict === 'alert' ? 'ALERT' : 'OK') : 'Live diagnosis unavailable')
+  addFact(diagnostics, 'State', project.state_status === 'invalid' ? 'Unreadable' : project.state_status === 'missing' ? 'No state file' : 'Recorded')
+  addFact(diagnostics, 'Previous', project.previous_release?.record_status === 'recorded' ? project.previous_release.tag : project.previous_release?.record_status === 'invalid' ? 'Unreadable record' : 'None')
+  if (!project.url_monitor) {
+    addFact(diagnostics, 'Branch / HEAD', cli ? `${cli.branch || 'unavailable'} / ${cli.head || 'unavailable'}` : 'Live diagnosis unavailable')
+    addFact(diagnostics, 'Compose env tag', cli?.env_tag ? `Recorded tag relation: ${cli.env_tag}` : 'Unavailable')
+    addFact(diagnostics, 'Compose runtime', cli?.runtime ? (cli.runtime.length ? cli.runtime.map(row => `${row.service}: ${row.state} · health ${row.health} · image ${row.image}`).join('; ') : 'No containers') : 'Live diagnosis unavailable')
+    addFact(diagnostics, 'DRIFT', cli ? (cli.drift.length ? cli.drift.join(', ') : 'None measured') : 'Not measured')
+    addFact(diagnostics, 'Disk (repo)', cli?.repo_bytes == null ? 'Unavailable' : `${cli.repo_bytes} bytes`)
+  }
+  card.append(diagnostics)
 
   return card
 }
@@ -493,11 +519,11 @@ const renderReadView = (payload, name, tab) => {
   readViewEl.append(readLink('← All services', '#/services'))
   const heading = element('div', 'read-heading')
   heading.append(element('h1', '', name), statusBadge(project.status))
-  readViewEl.append(heading, element('p', 'read-meta', `Health: ${project.health_url || 'Not configured'} · Release: ${project.release?.tag || 'not recorded'}`))
+  readViewEl.append(heading, element('p', 'read-meta', `Health: ${project.url_monitor ? 'URL configured (hidden)' : 'URL not exposed'} · Release: ${project.release?.tag || 'not recorded'}`))
   const monitor = project.url_monitor === true
   if (monitor) {
     const panel = readPanel('URL monitor', 'No deployment actions: this project only checks an HTTP URL.')
-    panel.append(element('p', '', `Status: ${labels[project.status] || 'Unknown'} · HTTP ${project.http_status || 'unavailable'} · ${project.latency_ms == null ? 'latency unavailable' : `${project.latency_ms} ms`}`))
+    panel.append(element('p', '', `CLI verdict: ${project.cli ? (project.cli.verdict === 'alert' ? 'ALERT' : 'OK') : 'unavailable'} · separate Web HTTP sample: ${project.http_status || 'unavailable'} · ${project.latency_ms == null ? 'latency unavailable' : `${project.latency_ms} ms`}`))
     if (project.error) panel.append(element('p', 'read-error', project.error))
     readViewEl.append(panel)
     return
@@ -558,10 +584,21 @@ const renderReadView = (payload, name, tab) => {
     form.addEventListener('submit', event => { event.preventDefault(); request() })
     content.append(panel)
     request()
-  } else if (tab === 'restore-points' || tab === 'restore-log') {
-    const title = tab === 'restore-points' ? 'Recorded releases and backup attempts' : 'Restore attempt journal'
+  } else if (tab === 'restore-points') {
+    const panel = readPanel('Recorded releases and backup attempts', 'yard restore-points · typed recorded state (read only)')
+    panel.append(element('p', 'read-note', 'Application releases only. Data backup attempts are not restore targets; destinations are hidden.'))
+    panel.append(element('p', '', `State file: ${project.state_status === 'invalid' ? 'unreadable (not absent)' : project.state_status === 'missing' ? 'absent' : 'recorded'}`))
+    for (const [label, record] of [['previous', project.previous_release], ['current', project.release], ['pending', project.pending_release]]) {
+      panel.append(element('p', '', `${label}: ${record?.record_status === 'recorded' ? `${record.tag} · ${record.status} · ${formatDateTime(record.deployed_at_unix, true)}` : record?.record_status === 'invalid' ? 'unreadable release record (not absent)' : project.state_status === 'invalid' ? 'unavailable' : 'none'}`))
+    }
+    for (const point of project.restore_points || []) panel.append(element('p', '', `${point.id} · ${point.position} · ${point.status} · ${formatDateTime(point.deployed_at_unix, true)}`))
+    for (const [label, attempt] of [['backup:local', project.last_backup], ['backup:offsite', project.last_offsite]]) {
+      panel.append(element('p', '', `${label}: ${project.state_status === 'invalid' ? 'unavailable' : attempt ? backupDetail(attempt) : 'no backup recorded'} (data: manual recovery only)`))
+    }
+    content.append(panel)
+  } else if (tab === 'restore-log') {
+    const title = 'Restore attempt journal'
     const panel = readPanel(title, `yard ${tab} ${name} · read-only output from the host`)
-    if (tab === 'restore-points') panel.append(element('p', 'read-note', 'Only recorded application releases. Backup destinations are descriptive metadata, not restorable data targets.'))
     readOutput(panel, { op: tab, project: name }, title, 'Refresh')
     content.append(panel)
   } else {
@@ -609,7 +646,7 @@ const renderRoute = payload => {
       else link.removeAttribute('aria-current')
     }
   }
-  if (renderedRoute === hash && detail && !hash.endsWith('/overview') &&
+  if (renderedRoute === hash && detail && !hash.endsWith('/overview') && !hash.endsWith('/restore-points') &&
     (images || (payload.projects || []).some(item => item.name === match[1]))) return
   renderedRoute = hash
   if (images) renderImagesView()

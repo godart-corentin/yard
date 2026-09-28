@@ -122,6 +122,25 @@ test('mixed cards retain semantic single detail links and independent external l
   assert.equal(find(cards[1], '.endpoint-link')[0].href, 'https://example.test/')
 })
 
+test('restore points use typed state, distinguish unreadable records and never read raw host output', () => {
+  const requests = []
+  const page = browser(url => { requests.push(url); return Promise.resolve(response(502, { error: 'Read operation failed' })) })
+  const data = structuredClone(payload)
+  data.projects[0].state_status = 'recorded'
+  data.projects[0].release = { record_status: 'invalid' }
+  data.projects[0].previous_release = { record_status: 'recorded', tag: 'previous', status: 'superseded', deployed_at_unix: 42 }
+  data.projects[0].pending_release = { record_status: 'missing' }
+  data.projects[0].restore_points = [{ position: 'previous', id: 'release:previous', status: 'superseded', deployed_at_unix: 42 }]
+  data.projects[0].cli = { verdict: 'alert', branch: 'main', head: 'abcdef', drift: ['api'] }
+  page.api.render(data)
+  page.navigate('#/project/app/restore-points')
+  assert.match(page.read().textContent, /current: unreadable release record \(not absent\)/)
+  assert.match(page.read().textContent, /release:previous/)
+  assert.match(page.read().textContent, /data: manual recovery only/)
+  assert.equal(requests.length, 0)
+  assert.match(find(page.projects(), '.cli-diagnostics')[0].textContent, /CLI overviewALERT/)
+})
+
 test('route links reset scroll; history traversal wins over native restoration; in-panel actions preserve scroll', async () => {
   const page = browser(async () => response(200, { output: 'real response' }))
   await tick()

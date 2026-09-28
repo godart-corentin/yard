@@ -142,8 +142,9 @@ test('backup results remain separate and missing information is explicit', () =>
   vm.runInNewContext(`${source}\nglobalThis.renderForTest = renderProject`, context)
   const block = context.renderForTest({ name: 'demo', status: 'operational', last_backup: attempt, last_offsite: failed, offsite_configured: true }, [])
   const facts = byClass(block, 'backup-facts')[0]
-  assert.match(facts.textContent, /Local backupSuccess.*\/archives/)
-  assert.match(facts.textContent, /Off-site copyFailure.*remote:test/)
+  assert.match(facts.textContent, /Local backupSuccess.*destination hidden/)
+  assert.match(facts.textContent, /Off-site copyFailure.*destination hidden/)
+  assert.doesNotMatch(facts.textContent, /\/archives|remote:test/)
   assert.equal(byClass(facts, 'bad').length, 1)
 })
 
@@ -170,24 +171,24 @@ test('unreadable records are visibly invalid, never missing or successful', () =
   assert.match(byClass(unconfigured, 'backup-facts')[0].textContent, /Off-site copyInvalid backup record/)
 })
 
-test('stopped worker degrades only its service and summary, not the host', () => {
+test('stopped worker degrades its service; host reflects its own critical metrics', () => {
   const elements = dashboard()
   const cards = byClass(elements.projects, 'service-card')
   assert.deepEqual(cards.map(card => byClass(card, 'service-header')[0].children[1].textContent),
     ['Degraded', 'Down'])
-  assert.equal(elements['host-badge'].textContent, 'Normal')
+  assert.equal(elements['host-badge'].textContent, 'Critical')
   assert.equal(elements['operational-count'].textContent, '0')
   assert.equal(elements['down-count'].textContent, '2')
   assert.equal(elements['overall-badge'].textContent, 'Down')
 })
 
-test('host contains CPU, RAM, disk and measurement age, never Load or Docker cards even with a query parameter', () => {
+test('host contains CPU, load, RAM, disk and Docker with measurement age', () => {
   const elements = dashboard('?variant=b')
   assert.deepEqual(byClass(elements['host-metrics'], 'host-metric').map(card => card.children[0].children[0].textContent),
-    ['CPU', 'RAM', 'Disk /'])
+    ['CPU', 'Load (1 / 5 / 15 min)', 'RAM', 'Disk /', 'Docker disk'])
   assert.equal(elements['host-age'].textContent, 'Measured 7 seconds ago')
   assert.equal(byClass(elements['host-metrics'], 'host-secondary').length, 0)
-  assert.equal(elements['host-badge'].textContent, 'Normal')
+  assert.equal(elements['host-badge'].textContent, 'Critical')
 })
 
 test('probes stay with their project card and display real measurements', () => {
@@ -208,7 +209,7 @@ test('probes stay with their project card and display real measurements', () => 
   assert.match(probes[0].textContent, /api.*Healthy.*42 ms/)
   assert.match(probes[1].textContent, /worker.*Unhealthy.*94 s/)
   assert.equal(byClass(cards[1], 'service-probe').length, 0)
-  assert.equal(elements['host-badge'].textContent, 'Normal')
+  assert.equal(elements['host-badge'].textContent, 'Critical')
 })
 
 test('unconfigured service probe does not create a Service health section', () => {

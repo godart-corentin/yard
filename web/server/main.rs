@@ -36,7 +36,7 @@ impl Config {
             static_dir: PathBuf::from(env_value("YARD_WEB_STATIC", "/opt/yard/static")),
             check_timeout: Duration::from_secs_f64(env_number(
                 "YARD_WEB_CHECK_TIMEOUT_SECONDS",
-                4.0,
+                5.0,
             )?),
             cache_duration: Duration::from_secs_f64(env_number("YARD_WEB_CACHE_SECONDS", 15.0)?),
             host_max_age_seconds: env_number("YARD_WEB_HOST_MAX_AGE_SECONDS", 300)?,
@@ -83,7 +83,6 @@ struct BackupAttempt {
     started_at_unix: u64,
     duration_ms: u128,
     result: BackupResult,
-    destination: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,8 +117,10 @@ struct Project {
     has_service_probes: bool,
     service_names: Vec<String>,
     url_monitor: bool,
-    release: Option<Value>,
-    pending_release: Option<Value>,
+    state_status: &'static str,
+    release: ReleaseView,
+    previous_release: ReleaseView,
+    pending_release: ReleaseView,
     last_backup: Option<BackupRecord>,
     last_offsite: Option<BackupRecord>,
     offsite_configured: Option<bool>,
@@ -128,15 +129,23 @@ struct Project {
 
 #[derive(Clone, Debug, Serialize)]
 struct ProjectStatus {
+    #[serde(serialize_with = "serialize_label")]
     name: String,
+    #[serde(serialize_with = "serialize_labels")]
     application_services: Vec<String>,
     url_monitor: bool,
+    // A monitor URL may contain tokens in its path or query; keep it server-side.
+    #[serde(skip_serializing)]
     health_url: Option<String>,
     services: Vec<ServiceHealth>,
     #[serde(skip)]
     uses_service_probes: bool,
-    release: Option<Value>,
-    pending_release: Option<Value>,
+    state_status: &'static str,
+    release: ReleaseView,
+    previous_release: ReleaseView,
+    pending_release: ReleaseView,
+    restore_points: Vec<RestorePoint>,
+    cli: Option<Diagnostic>,
     last_backup: Option<BackupRecord>,
     last_offsite: Option<BackupRecord>,
     offsite_configured: Option<bool>,
@@ -155,6 +164,83 @@ struct StatusPayload {
     checked_at: String,
     projects: Vec<ProjectStatus>,
     host: HostStatus,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReleaseView {
+    record_status: &'static str,
+    tag: Option<String>,
+    revision: Option<String>,
+    deployed_at_unix: Option<u64>,
+    status: Option<String>,
+    services: Vec<ReleaseServiceView>,
+}
+
+impl ReleaseView {
+    fn empty(record_status: &'static str) -> Self {
+        Self {
+            record_status,
+            tag: None,
+            revision: None,
+            deployed_at_unix: None,
+            status: None,
+            services: vec![],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReleaseServiceView {
+    name: String,
+    image: String,
+}
+
+#[derive(Deserialize)]
+struct RecordedRelease {
+    revision: String,
+    tag: String,
+    deployed_at_unix: u64,
+    #[serde(default)]
+    services: Vec<RecordedService>,
+    #[serde(default = "active_status")]
+    status: String,
+}
+fn active_status() -> String {
+    "active".into()
+}
+#[derive(Deserialize)]
+struct RecordedService {
+    name: String,
+    image: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RestorePoint {
+    position: &'static str,
+    id: String,
+    deployed_at_unix: u64,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Diagnostic {
+    name: String,
+    verdict: String,
+    reason: Option<String>,
+    branch: Option<String>,
+    head: Option<String>,
+    env_tag: Option<String>,
+    runtime: Option<Vec<RuntimeView>>,
+    drift: Vec<String>,
+    repo_bytes: Option<u64>,
+    measured_at_unix: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RuntimeView {
+    service: String,
+    state: String,
+    health: String,
+    image: String,
 }
 
 // Deserialize only the public, versioned snapshot fields. Never proxy arbitrary JSON from disk.
@@ -187,6 +273,7 @@ struct HostMemory {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HostDisk {
+    #[serde(deserialize_with = "safe_mount")]
     mount: String,
     used_bytes: u64,
     total_bytes: u64,
@@ -279,7 +366,53 @@ fn load_host(state_dir: &Path, now: u64, max_age: u64) -> HostStatus {
     if age > max_age {
         return unavailable(Some(age), "Host snapshot stale");
     }
+    // The on-disk snapshot is not trusted browser text.
+    snapshot.cpu.message = None;
+    snapshot.load.message = None;
+    snapshot.memory.message = None;
+    snapshot.docker.message = None;
+    for disk in &mut snapshot.disks {
+        disk.message = None;
+    }
+    if let Some(docker) = &mut snapshot.docker.value {
+        docker.images = safe_usage(&docker.images);
+        docker.containers = safe_usage(&docker.containers);
+        docker.volumes = safe_usage(&docker.volumes);
+    }
+    snapshot.containers_message = snapshot.containers_message.filter(|message| {
+        matches!(
+            message.as_str(),
+            "No containers for a configured project" | "Containers unavailable"
+        )
+    });
+    for container in &mut snapshot.containers {
+        container.project = safe_label(&container.project);
+        container.service = safe_label(&container.service);
+        if !matches!(
+            container.state.as_str(),
+            "running" | "exited" | "paused" | "restarting" | "created" | "dead"
+        ) {
+            container.state = "unknown".into();
+        }
+    }
     for service in &mut snapshot.services {
+        service.project = safe_label(&service.project);
+        service.service = safe_label(&service.service);
+        service.kind = service
+            .kind
+            .take()
+            .filter(|kind| matches!(kind.as_str(), "http" | "heartbeat"));
+        service.message = service.message.take().filter(|message| {
+            matches!(
+                message.as_str(),
+                "No service probe configured"
+                    | "Container unavailable"
+                    | "Container stopped"
+                    | "HTTP non-success response"
+                    | "HTTP request failed or timed out"
+                    | "Heartbeat missing, unreadable or in the future"
+            )
+        });
         if service.kind.as_deref() != Some("heartbeat") {
             continue;
         }
@@ -315,6 +448,166 @@ fn load_host(state_dir: &Path, now: u64, max_age: u64) -> HostStatus {
     }
 }
 
+fn safe_mount<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let mount = String::deserialize(deserializer)?;
+    Ok(if mount == "/" {
+        "/".into()
+    } else {
+        "(mount hidden)".into()
+    })
+}
+
+fn safe_label(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        value.into()
+    } else {
+        "(redacted)".into()
+    }
+}
+
+fn serialize_label<S: serde::Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&safe_label(value))
+}
+
+fn serialize_labels<S: serde::Serializer>(
+    values: &[String],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    values
+        .iter()
+        .map(|value| safe_label(value))
+        .collect::<Vec<_>>()
+        .serialize(serializer)
+}
+
+fn safe_usage(value: &str) -> String {
+    let size = value.trim_end_matches(|b: char| b.is_ascii_alphabetic());
+    let unit = &value[size.len()..];
+    if value.len() <= 24
+        && !size.is_empty()
+        && matches!(unit, "B" | "kB" | "KB" | "MB" | "GB" | "TB" | "PB")
+        && size.bytes().filter(|b| *b == b'.').count() <= 1
+        && size.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && !size.starts_with('.')
+        && !size.ends_with('.')
+    {
+        value.to_owned()
+    } else {
+        "(redacted)".into()
+    }
+}
+
+fn safe_image(value: &str) -> String {
+    if !value.is_empty()
+        && value.len() <= 160
+        && !value.starts_with('/')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':'))
+    {
+        value.into()
+    } else {
+        "(redacted)".into()
+    }
+}
+
+fn release_view(value: Option<&Value>, missing: &'static str) -> ReleaseView {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return ReleaseView::empty(missing);
+    };
+    match serde_json::from_value::<RecordedRelease>(value.clone()) {
+        Ok(release) => ReleaseView {
+            record_status: "recorded",
+            tag: Some(safe_label(&release.tag)),
+            revision: Some(safe_label(&release.revision)),
+            deployed_at_unix: Some(release.deployed_at_unix),
+            status: Some(
+                if matches!(
+                    release.status.as_str(),
+                    "active" | "superseded" | "activating"
+                ) {
+                    release.status
+                } else {
+                    "(redacted)".into()
+                },
+            ),
+            services: release
+                .services
+                .into_iter()
+                .map(|service| ReleaseServiceView {
+                    name: safe_label(&service.name),
+                    image: safe_image(&service.image),
+                })
+                .collect(),
+        },
+        Err(_) => ReleaseView::empty("invalid"),
+    }
+}
+
+fn restore_points(
+    current: &ReleaseView,
+    previous: &ReleaseView,
+    pending: &ReleaseView,
+) -> Vec<RestorePoint> {
+    [
+        ("previous", previous),
+        ("current", current),
+        ("pending", pending),
+    ]
+    .into_iter()
+    .filter_map(|(position, record)| {
+        (record.record_status == "recorded" && record.tag.as_deref() != Some("(redacted)"))
+            .then(|| {
+                Some(RestorePoint {
+                    position,
+                    id: format!("release:{}", record.tag.as_deref()?),
+                    deployed_at_unix: record.deployed_at_unix?,
+                    status: record.status.clone()?,
+                })
+            })
+            .flatten()
+    })
+    .collect()
+}
+
+fn safe_http_url(value: &str) -> bool {
+    reqwest::Url::parse(value).ok().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+
+fn monitor_url(contents: &str) -> Result<Option<String>, ()> {
+    let value: toml::Value = toml::from_str(contents).map_err(|_| ())?;
+    let root = value.as_table().ok_or(())?;
+    if root.len() != 1 || !root.contains_key("deployment") {
+        return Ok(None);
+    }
+    let deployment = root
+        .get("deployment")
+        .and_then(toml::Value::as_table)
+        .ok_or(())?;
+    if deployment.len() != 1 {
+        return Err(());
+    }
+    let url = deployment
+        .get("health_url")
+        .and_then(toml::Value::as_str)
+        .ok_or(())?;
+    if !safe_http_url(url) {
+        return Err(());
+    }
+    Ok(Some(url.to_owned()))
+}
+
 struct Cache {
     value: Option<StatusPayload>,
     valid_until: Instant,
@@ -346,7 +639,20 @@ impl App {
     fn status(&self) -> StatusPayload {
         if let Some(mut value) = self.cached_status() {
             value.host = self.host_status();
+            // Live CLI verdicts and recorded release views must refer to the same state.
+            for project in &mut value.projects {
+                let (state_status, release, previous, pending, backup, offsite) =
+                    load_project_state(&self.config.state_dir, &project.name);
+                project.state_status = state_status;
+                project.restore_points = restore_points(&release, &previous, &pending);
+                project.release = release;
+                project.previous_release = previous;
+                project.pending_release = pending;
+                project.last_backup = backup;
+                project.last_offsite = offsite;
+            }
             apply_service_snapshot(&mut value);
+            self.apply_cli(&mut value);
             return value;
         }
 
@@ -363,7 +669,38 @@ impl App {
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
         cache.valid_until = Instant::now() + self.config.cache_duration;
         cache.value = Some(payload.clone());
+        drop(cache);
+        self.apply_cli(&mut payload);
         payload
+    }
+
+    fn apply_cli(&self, payload: &mut StatusPayload) {
+        let diagnostics = load_diagnostics(&self.config.read_socket);
+        for project in &mut payload.projects {
+            project.cli = diagnostics
+                .as_ref()
+                .and_then(|items| items.iter().find(|item| item.name == project.name))
+                .cloned();
+            project.status = match project.cli.as_ref().map(|item| item.verdict.as_str()) {
+                Some("ok") => "operational",
+                Some("alert") => "down",
+                _ => "unknown",
+            }
+            .into();
+            if !project.url_monitor {
+                project.error = match project.cli.as_ref().and_then(|item| item.reason.as_deref()) {
+                    Some("state_unreadable") => Some("State unreadable".into()),
+                    Some("manifest_unreadable") => {
+                        Some("Project manifest unreadable or invalid".into())
+                    }
+                    _ if project.cli.is_none() => Some("CLI live diagnostics unavailable".into()),
+                    _ => None,
+                };
+            } else if project.cli.is_none() {
+                project.error = Some("CLI live diagnostics unavailable".into());
+            }
+        }
+        payload.status = overall_status(&payload.projects).to_owned();
     }
 
     fn cached_status(&self) -> Option<StatusPayload> {
@@ -387,6 +724,64 @@ impl App {
     }
 }
 
+fn load_diagnostics(socket: &Path) -> Option<Vec<Diagnostic>> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(13)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
+    stream.write_all(b"{\"op\":\"diagnostics\"}\n").ok()?;
+    let mut bytes = Vec::new();
+    stream.take(1_048_577).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 1_048_576 {
+        return None;
+    }
+    let reply: Value = serde_json::from_slice(&bytes).ok()?;
+    let parsed =
+        serde_json::from_value::<Vec<Diagnostic>>(reply.get("diagnostics")?.clone()).ok()?;
+    parsed
+        .into_iter()
+        .map(|mut item| {
+            if !matches!(item.verdict.as_str(), "ok" | "alert") {
+                return None;
+            }
+            item.name = safe_label(&item.name);
+            item.branch = item.branch.as_deref().map(safe_label);
+            item.head = item.head.as_deref().map(safe_label);
+            item.env_tag = item.env_tag.as_deref().map(safe_label);
+            item.drift = item.drift.iter().map(|value| safe_label(value)).collect();
+            item.reason = item.reason.filter(|reason| {
+                matches!(
+                    reason.as_str(),
+                    "url_monitor" | "state_unreadable" | "manifest_unreadable"
+                )
+            });
+            for row in item.runtime.iter_mut().flatten() {
+                row.service = safe_label(&row.service);
+                if !matches!(row.state.as_str(), "running" | "completed" | "stopped") {
+                    return None;
+                }
+                if !matches!(
+                    row.health.as_str(),
+                    "healthy" | "unhealthy" | "starting" | "unknown"
+                ) {
+                    return None;
+                }
+                if !matches!(row.image.as_str(), "recorded" | "unrecorded" | "unknown") {
+                    return None;
+                }
+            }
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+            if item.measured_at_unix > now + 5 || now.saturating_sub(item.measured_at_unix) > 30 {
+                return None;
+            }
+            Some(item)
+        })
+        .collect()
+}
+
 fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
     let Ok(entries) = fs::read_dir(projects_dir) else {
         return Vec::new();
@@ -405,18 +800,32 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
             if name == "host" {
                 return None;
             }
-            let (release, pending_release, last_backup, last_offsite) =
-                load_project_state(state_dir, &name);
+            let (
+                state_status,
+                release,
+                previous_release,
+                pending_release,
+                last_backup,
+                last_offsite,
+            ) = load_project_state(state_dir, &name);
             let parsed = fs::read_to_string(&path)
-                .map_err(|error| error.to_string())
+                .map_err(|_| ())
                 .and_then(|contents| {
-                    toml::from_str::<ProjectFile>(&contents).map_err(|error| error.to_string())
+                    let monitor = monitor_url(&contents)?;
+                    let config = toml::from_str::<ProjectFile>(&contents).map_err(|_| ())?;
+                    if config.compose.is_none()
+                        && contents.contains("[deployment]")
+                        && monitor.is_none()
+                    {
+                        return Err(());
+                    }
+                    Ok((config, monitor))
                 });
 
             Some(match parsed {
-                Ok(config) => Project {
+                Ok((config, monitor)) => Project {
                     name,
-                    url_monitor: config.compose.is_none(),
+                    url_monitor: monitor.is_some(),
                     has_service_probes: config.service_health.as_ref().is_some_and(|probes| {
                         probes.as_table().is_some_and(|table| !table.is_empty())
                     }),
@@ -443,12 +852,16 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                                 .unwrap_or_default()
                         })
                         .unwrap_or_default(),
-                    health_url: config
-                        .deployment
-                        .and_then(|deployment| deployment.health_url)
-                        .map(|url| url.trim().to_owned())
-                        .filter(|url| !url.is_empty()),
+                    health_url: monitor.or_else(|| {
+                        config
+                            .deployment
+                            .and_then(|deployment| deployment.health_url)
+                            .map(|url| url.trim().to_owned())
+                            .filter(|url| safe_http_url(url))
+                    }),
+                    state_status,
                     release,
+                    previous_release,
                     pending_release,
                     last_backup,
                     last_offsite,
@@ -460,18 +873,20 @@ fn load_projects(projects_dir: &Path, state_dir: &Path) -> Vec<Project> {
                     ),
                     config_error: None,
                 },
-                Err(error) => Project {
+                Err(_) => Project {
                     name,
                     url_monitor: false,
                     health_url: None,
                     has_service_probes: false,
                     service_names: vec![],
+                    state_status,
                     release,
+                    previous_release,
                     pending_release,
                     last_backup,
                     last_offsite,
                     offsite_configured: None,
-                    config_error: Some(error),
+                    config_error: Some("Project manifest unreadable or invalid".into()),
                 },
             })
         })
@@ -482,24 +897,31 @@ fn load_project_state(
     state_dir: &Path,
     project: &str,
 ) -> (
-    Option<Value>,
-    Option<Value>,
+    &'static str,
+    ReleaseView,
+    ReleaseView,
+    ReleaseView,
     Option<BackupRecord>,
     Option<BackupRecord>,
 ) {
     // host.json is reserved for the CLI's host snapshot, never project state.
     if project == "host" {
-        return (None, None, None, None);
+        return (
+            "missing",
+            ReleaseView::empty("missing"),
+            ReleaseView::empty("missing"),
+            ReleaseView::empty("missing"),
+            None,
+            None,
+        );
     }
-    let state = fs::read_to_string(state_dir.join(format!("{project}.json")))
-        .ok()
-        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok());
-    let field = |name| {
-        state
-            .as_ref()
-            .and_then(|state| state.get(name))
-            .filter(|value| value.is_object())
-            .cloned()
+    let (status, state) = match fs::read_to_string(state_dir.join(format!("{project}.json"))) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("missing", None),
+        Err(_) => ("invalid", None),
+        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+            Ok(value) if value.is_object() => ("recorded", Some(value)),
+            _ => ("invalid", None),
+        },
     };
     let backup = |name| {
         state
@@ -513,8 +935,20 @@ fn load_project_state(
                 },
             )
     };
+    let field = |name| {
+        release_view(
+            state.as_ref().and_then(|value| value.get(name)),
+            if status == "invalid" {
+                "unavailable"
+            } else {
+                "missing"
+            },
+        )
+    };
     (
+        status,
         field("current"),
+        field("previous"),
         field("pending"),
         backup("last_backup"),
         backup("last_offsite"),
@@ -579,8 +1013,16 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
             })
             .collect(),
         uses_service_probes: project.has_service_probes,
+        state_status: project.state_status,
+        restore_points: restore_points(
+            &project.release,
+            &project.previous_release,
+            &project.pending_release,
+        ),
         release: project.release,
+        previous_release: project.previous_release,
         pending_release: project.pending_release,
+        cli: None,
         last_backup: project.last_backup,
         last_offsite: project.last_offsite,
         offsite_configured: project.offsite_configured,
@@ -594,6 +1036,11 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
 
     if let Some(error) = project.config_error {
         result.error = Some(error);
+        return result;
+    }
+
+    if !project.url_monitor {
+        result.error = Some("CLI live diagnostics unavailable".to_owned());
         return result;
     }
 
@@ -623,7 +1070,7 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
             let _ = response.by_ref().take(1024).read_to_end(&mut body);
             result.latency_ms = Some(started.elapsed().as_millis());
             result.http_status = Some(status);
-            if (200..400).contains(&status) {
+            if (200..300).contains(&status) {
                 result.status = "operational".to_owned();
             } else {
                 result.status = "down".to_owned();
@@ -632,7 +1079,8 @@ fn check_project(project: Project, client: &Client) -> ProjectStatus {
         }
         Err(error) => {
             result.status = "down".to_owned();
-            result.error = Some(error.to_string());
+            let _ = error;
+            result.error = Some("HTTP request failed or timed out".to_owned());
         }
     }
     result
@@ -1126,8 +1574,12 @@ mod tests {
             health_url: None,
             services: vec![],
             uses_service_probes: false,
-            release: None,
-            pending_release: None,
+            state_status: "missing",
+            release: ReleaseView::empty("missing"),
+            previous_release: ReleaseView::empty("missing"),
+            pending_release: ReleaseView::empty("missing"),
+            restore_points: vec![],
+            cli: None,
             last_backup: None,
             last_offsite: None,
             offsite_configured: Some(false),
@@ -1182,8 +1634,127 @@ mod tests {
             loaded[0].health_url.as_deref(),
             Some("https://example.test/health")
         );
-        assert_eq!(loaded[0].release.as_ref().unwrap()["tag"], "abcdef123456");
+        assert_eq!(loaded[0].release.tag.as_deref(), Some("abcdef123456"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_boundary_hides_url_tokens_paths_arbitrary_state_and_snapshot_text() {
+        let root = temp_dir("redaction");
+        let projects = root.join("projects");
+        let state = root.join("state");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(
+            projects.join("demo.toml"),
+            "[deployment]\nhealth_url = 'https://example.test/secret/TOKEN?key=TOKEN'\n",
+        )
+        .unwrap();
+        fs::write(state.join("demo.json"), r#"{"current":{"revision":"abc","tag":"/private/TOKEN","deployed_at_unix":42,"services":[{"name":"api","image":"/private/TOKEN"}],"secret":"TOKEN"},"previous":{"revision":"def","tag":"safe","deployed_at_unix":40},"last_backup":{"started_at_unix":40,"duration_ms":1,"result":"success","destination":"/private/TOKEN"},"unknown":"TOKEN"}"#).unwrap();
+        let mut checked = check_project(load_projects(&projects, &state).remove(0), &Client::new());
+        let json = serde_json::to_value(&checked).unwrap();
+        assert!(json.get("health_url").is_none());
+        assert_eq!(json["state_status"], "recorded");
+        assert_eq!(json["release"]["tag"], "(redacted)");
+        assert_eq!(json["release"]["services"][0]["image"], "(redacted)");
+        assert_eq!(json["previous_release"]["tag"], "safe");
+        assert_eq!(json["restore_points"].as_array().unwrap().len(), 1);
+        assert!(!json.to_string().contains("TOKEN"));
+        checked.name = "/private/TOKEN".into();
+        checked.application_services = vec!["/private/TOKEN".into()];
+        let exposed = serde_json::to_value(&checked).unwrap();
+        assert_eq!(exposed["name"], "(redacted)");
+        assert_eq!(exposed["application_services"][0], "(redacted)");
+        let mut hostile: Value = serde_json::from_str(VALID_HOST).unwrap();
+        hostile["disks"] = serde_json::json!([{"status":"normal","value":{"mount":"/private/TOKEN","used_bytes":1,"total_bytes":2},"message":"TOKEN"}]);
+        hostile["containers"] = serde_json::json!([{"project":"demo","service":"/private/TOKEN","state":"running","status":"normal"}]);
+        hostile["containers_message"] = serde_json::json!("TOKEN");
+        hostile["docker"] = serde_json::json!({"value":{"images":"TOKEN/secret","containers":"2GB","volumes":"0B"},"status":"normal","message":"TOKEN"});
+        fs::write(state.join("host.json"), hostile.to_string()).unwrap();
+        let host = serde_json::to_value(load_host(&state, 1001, 300)).unwrap();
+        assert_eq!(
+            host["snapshot"]["disks"][0]["value"]["mount"],
+            "(mount hidden)"
+        );
+        assert_eq!(host["snapshot"]["docker"]["value"]["images"], "(redacted)");
+        assert!(!host.to_string().contains("TOKEN"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_and_malformed_release_records_are_distinct_and_not_restore_targets() {
+        let root = temp_dir("invalid-release");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        assert_eq!(load_project_state(&state, "demo").0, "missing");
+        fs::write(state.join("demo.json"), "{broken").unwrap();
+        let (status, current, _, _, _, _) = load_project_state(&state, "demo");
+        assert_eq!(status, "invalid");
+        assert_eq!(current.record_status, "unavailable");
+        fs::write(state.join("demo.json"), r#"{"current":{"tag":"partial"},"previous":{"revision":"def","tag":"prior","deployed_at_unix":42},"pending":null}"#).unwrap();
+        let (status, current, previous, pending, _, _) = load_project_state(&state, "demo");
+        assert_eq!(status, "recorded");
+        assert_eq!(current.record_status, "invalid");
+        assert_eq!(pending.record_status, "missing");
+        assert_eq!(restore_points(&current, &previous, &pending).len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_socket_verdict_overrides_cached_web_probes_for_monitors_and_compose() {
+        use std::os::unix::net::UnixListener;
+        let dir = temp_dir("socket-verdict");
+        let socket = dir.join("read.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(&mut stream).read_line(&mut request).unwrap();
+            assert_eq!(request, "{\"op\":\"diagnostics\"}\n");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let reply = serde_json::json!({"diagnostics":[
+                {"name":"monitor","verdict":"alert","reason":"url_monitor","branch":null,"head":null,"env_tag":null,"runtime":null,"drift":[],"repo_bytes":null,"measured_at_unix":now},
+                {"name":"demo","verdict":"ok","reason":null,"branch":"main","head":"abcd","env_tag":null,"runtime":[],"drift":[],"repo_bytes":0,"measured_at_unix":now}
+            ]});
+            stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+        });
+        let app = App::new(Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects_dir: dir.clone(),
+            state_dir: dir.clone(),
+            static_dir: dir.clone(),
+            check_timeout: Duration::from_secs(1),
+            cache_duration: Duration::from_secs(1),
+            host_max_age_seconds: 300,
+            read_socket: socket,
+        })
+        .unwrap();
+        let mut payload = StatusPayload {
+            status: "operational".into(),
+            checked_at: utc_now(),
+            host: app.host_status(),
+            projects: vec![
+                ProjectStatus {
+                    name: "monitor".into(),
+                    url_monitor: true,
+                    ..project("operational")
+                },
+                ProjectStatus {
+                    name: "demo".into(),
+                    ..project("down")
+                },
+            ],
+        };
+        app.apply_cli(&mut payload);
+        server.join().unwrap();
+        assert_eq!(payload.projects[0].status, "down");
+        assert_eq!(payload.projects[1].status, "operational");
+        assert_eq!(payload.status, "degraded");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1203,7 +1774,7 @@ mod tests {
         let payload = serde_json::to_value(checked).unwrap();
         assert_eq!(payload["last_backup"]["result"], "success");
         assert_eq!(payload["last_offsite"]["result"], "failure");
-        assert_eq!(payload["last_offsite"]["destination"], "remote:test");
+        assert!(payload["last_offsite"].get("destination").is_none());
         assert_eq!(payload["offsite_configured"], true);
         assert!(payload["last_backup"].get("secret").is_none());
         fs::write(
@@ -1265,7 +1836,7 @@ mod tests {
         fs::create_dir_all(&projects).unwrap();
         fs::create_dir_all(&state).unwrap();
         fs::write(projects.join("demo.toml"), "[deployment]\n").unwrap();
-        fs::write(state.join("demo.json"), r#"{"current":{"tag":"old"},"pending":{"tag":"new","status":"activating","services":[{"name":"api","image":"api:new"}]}}"#).unwrap();
+        fs::write(state.join("demo.json"), r#"{"current":{"revision":"abcd1234","tag":"old","deployed_at_unix":100},"pending":{"revision":"abcd1235","tag":"new","deployed_at_unix":101,"status":"activating","services":[{"name":"api","image":"api:new"}]}}"#).unwrap();
         let project = load_projects(&projects, &state).remove(0);
         let checked = check_project(project, &Client::new());
         let payload = serde_json::to_value(checked).unwrap();
@@ -1287,8 +1858,10 @@ mod tests {
                 url_monitor: false,
                 has_service_probes: false,
                 service_names: vec![],
-                release: None,
-                pending_release: None,
+                state_status: "missing",
+                release: ReleaseView::empty("missing"),
+                previous_release: ReleaseView::empty("missing"),
+                pending_release: ReleaseView::empty("missing"),
                 last_backup: None,
                 last_offsite: None,
                 offsite_configured: Some(false),
@@ -1297,7 +1870,10 @@ mod tests {
             &client,
         );
         assert_eq!(checked.status, "unknown");
-        assert!(checked.error.unwrap().contains("No deployment.health_url"));
+        assert!(checked
+            .error
+            .unwrap()
+            .contains("CLI live diagnostics unavailable"));
     }
 
     #[test]
@@ -1310,8 +1886,10 @@ mod tests {
                 url_monitor: false,
                 has_service_probes: false,
                 service_names: vec!["api".to_owned()],
-                release: None,
-                pending_release: None,
+                state_status: "missing",
+                release: ReleaseView::empty("missing"),
+                previous_release: ReleaseView::empty("missing"),
+                pending_release: ReleaseView::empty("missing"),
                 last_backup: None,
                 last_offsite: None,
                 offsite_configured: Some(false),
@@ -1366,8 +1944,10 @@ mod tests {
                 url_monitor: false,
                 has_service_probes: false,
                 service_names: vec![],
-                release: None,
-                pending_release: None,
+                state_status: "missing",
+                release: ReleaseView::empty("missing"),
+                previous_release: ReleaseView::empty("missing"),
+                pending_release: ReleaseView::empty("missing"),
                 last_backup: None,
                 last_offsite: None,
                 offsite_configured: None,
@@ -1401,11 +1981,13 @@ mod tests {
             Project {
                 name: "hello".to_owned(),
                 health_url: Some(format!("http://{address}/health")),
-                url_monitor: false,
+                url_monitor: true,
                 has_service_probes: false,
                 service_names: vec![],
-                release: None,
-                pending_release: None,
+                state_status: "missing",
+                release: ReleaseView::empty("missing"),
+                previous_release: ReleaseView::empty("missing"),
+                pending_release: ReleaseView::empty("missing"),
                 last_backup: None,
                 last_offsite: None,
                 offsite_configured: Some(false),
@@ -1473,8 +2055,12 @@ mod tests {
             r#"{"current":{"tag":"wrong"},"pending":{"tag":"also-wrong"}}"#,
         )
         .unwrap();
-        let (current, pending, local, offsite) = load_project_state(&dir, "host");
-        assert!(current.is_none() && pending.is_none() && local.is_none() && offsite.is_none());
+        let (status, current, previous, pending, local, offsite) = load_project_state(&dir, "host");
+        assert_eq!(status, "missing");
+        assert_eq!(current.record_status, "missing");
+        assert_eq!(previous.record_status, "missing");
+        assert_eq!(pending.record_status, "missing");
+        assert!(local.is_none() && offsite.is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1640,7 +2226,7 @@ mod tests {
         }
         assert_eq!(exposed["load"]["value"], snapshot["load"]["value"]);
         assert_eq!(exposed["docker"]["value"], snapshot["docker"]["value"]);
-        assert_eq!(payload["projects"][0]["status"], "degraded");
+        assert_eq!(payload["projects"][0]["status"], "unknown");
         assert_eq!(payload["projects"][0]["services"][0]["latency_ms"], 42);
         assert!(
             payload["projects"][0]["services"][1]["age_seconds"]
@@ -1649,7 +2235,7 @@ mod tests {
                 >= 40
         );
         assert_eq!(payload["projects"][0]["services"][1]["status"], "degraded");
-        assert_eq!(payload["status"], "degraded");
+        assert_eq!(payload["status"], "unknown");
         assert!(!exposed.contains_key("secret"));
         fs::remove_dir_all(dir).unwrap();
     }

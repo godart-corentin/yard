@@ -155,3 +155,79 @@ fn configured_service_logs_are_one_shot_with_bounded_filters() {
     );
     assert!(!output.contains("--follow"), "{output}");
 }
+
+#[test]
+fn diagnostics_match_cli_overview_for_running_drift_pending_and_unreadable_state() {
+    let fixture = Fixture::with_fake_docker();
+    let docker = fixture.root.join("bin/docker");
+    fs::write(&docker, "#!/bin/sh\ncase \"$*\" in\n  *'ps --all --format json'*) printf '%s\\n' '{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"healthy\",\"Image\":\"demo:current\"}' ;;\n  *) exit 1 ;;\nesac\n").unwrap();
+    fs::write(fixture.root.join("app/.env"), "DEMO_TAG=TOPSECRET\n").unwrap();
+    let cli = || {
+        let output = Command::new(env!("CARGO_BIN_EXE_yard"))
+            .args([
+                "--projects-dir",
+                fixture.root.join("projects").to_str().unwrap(),
+                "--state-dir",
+                fixture.root.join("state").to_str().unwrap(),
+                "status",
+            ])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.root.join("bin").display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    for (record, expected) in [
+        (
+            r#"{"current":{"revision":"current","tag":"current","deployed_at_unix":42,"services":[{"name":"api","image":"demo:current"}]}}"#,
+            "ok",
+        ),
+        (
+            r#"{"current":{"revision":"current","tag":"current","deployed_at_unix":42,"services":[{"name":"api","image":"demo:old"}]}}"#,
+            "alert",
+        ),
+        (
+            r#"{"pending":{"revision":"next","tag":"next","deployed_at_unix":43}}"#,
+            "alert",
+        ),
+        ("{broken", "alert"),
+    ] {
+        fs::write(fixture.root.join("state/demo.json"), record).unwrap();
+        let diagnostic = fixture.request(r#"{"op":"diagnostics"}"#);
+        let item = diagnostic["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == "demo")
+            .unwrap();
+        assert_eq!(item["verdict"], expected, "{item}");
+        if expected == "ok" {
+            assert_eq!(item["env_tag"], "other");
+        }
+        assert!(!diagnostic.to_string().contains("TOPSECRET"));
+        assert!(cli().contains(&format!(
+            "{} demo:",
+            if expected == "ok" { "OK" } else { "ALERT" }
+        )));
+        assert!(!diagnostic
+            .to_string()
+            .contains(fixture.root.to_str().unwrap()));
+    }
+    for request in [
+        r#"{"op":"diagnostics","project":"demo"}"#,
+        r#"{"op":"diagnostics","secret":"value"}"#,
+    ] {
+        assert_eq!(fixture.request(request)["error"], "Read operation refused");
+    }
+}

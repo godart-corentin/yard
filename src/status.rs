@@ -3,7 +3,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, YardError};
 use crate::host;
@@ -371,6 +371,214 @@ fn expected_finished_migration(project: &Project, service: &ComposeService) -> b
         && service.exit_code == Some(0)
 }
 
+// The CLI overview and Web read boundary use exactly the same alert predicate.
+fn overview_problem(
+    project: &Project,
+    state: &ProjectState,
+    services: Option<&[ComposeService]>,
+    health: &[&ServiceHealth],
+    drifts: &[String],
+) -> bool {
+    services.map_or(true, |rows| {
+        rows.is_empty()
+            || rows.iter().any(|row| {
+                !row.state.eq_ignore_ascii_case("running")
+                    && !expected_finished_migration(project, row)
+            })
+            || project
+                .config
+                .compose
+                .services
+                .iter()
+                .any(|name| !rows.iter().any(|row| row.display_name() == name))
+    }) || health.iter().any(|item| {
+        matches!(item.status, Health::Degraded | Health::Unhealthy)
+            || item.message == Some("Container unavailable")
+    }) || project.config.service_health.keys().any(|name| {
+        health
+            .iter()
+            .find(|item| item.service == *name)
+            .map_or(true, |item| item.status == Health::Unknown)
+    }) || !drifts.is_empty()
+        || state.pending.is_some()
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WebDiagnostic {
+    name: String,
+    verdict: &'static str,
+    reason: Option<&'static str>,
+    branch: Option<String>,
+    head: Option<String>,
+    env_tag: Option<String>,
+    runtime: Option<Vec<WebRuntime>>,
+    drift: Vec<String>,
+    repo_bytes: Option<u64>,
+    measured_at_unix: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct WebRuntime {
+    service: String,
+    state: &'static str,
+    health: &'static str,
+    image: &'static str,
+}
+
+// Read-only live measurements: same alert predicate as overview, not a cached
+// host snapshot. Neither command output, paths nor environment values cross the socket.
+pub(crate) fn web_diagnostics(projects_dir: &Path, state_dir: &Path) -> Vec<WebDiagnostic> {
+    let snapshot = host::collect(projects_dir);
+    Project::list(projects_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| {
+            let mut item = WebDiagnostic {
+                name: name.clone(),
+                verdict: "unavailable",
+                reason: None,
+                branch: None,
+                head: None,
+                env_tag: None,
+                runtime: None,
+                drift: Vec::new(),
+                repo_bytes: None,
+                measured_at_unix: snapshot.collected_at_unix,
+            };
+            let path = projects_dir.join(format!("{name}.toml"));
+            match Monitor::load(&path) {
+                Ok(Some(monitor)) => {
+                    item.verdict = if monitor.check().0 { "ok" } else { "alert" };
+                    item.reason = Some("url_monitor");
+                    return item;
+                }
+                Err(_) => {
+                    item.verdict = "alert";
+                    item.reason = Some("manifest_unreadable");
+                    return item;
+                }
+                Ok(None) => {}
+            }
+            let Ok(project) = Project::load(&name, projects_dir, state_dir) else {
+                item.verdict = "alert";
+                item.reason = Some("manifest_unreadable");
+                return item;
+            };
+            let Ok(state) = load_state(&project) else {
+                item.verdict = "alert";
+                item.reason = Some("state_unreadable");
+                return item;
+            };
+            item.branch = project.current_branch().ok().map(|branch| {
+                if branch.is_empty() {
+                    "(detached)".into()
+                } else {
+                    safe_label(&branch)
+                }
+            });
+            item.head = project
+                .head_revision()
+                .ok()
+                .map(|head| Project::tag_for_revision(&head));
+            item.env_tag = Some(
+                match project.current_tag_from_env() {
+                    Ok(Some(tag)) if state.current.as_ref().is_some_and(|r| r.tag == tag) => {
+                        "current"
+                    }
+                    Ok(Some(tag)) if state.previous.as_ref().is_some_and(|r| r.tag == tag) => {
+                        "previous"
+                    }
+                    Ok(Some(tag)) if state.pending.as_ref().is_some_and(|r| r.tag == tag) => {
+                        "pending"
+                    }
+                    Ok(Some(_)) => "other",
+                    Ok(None) => "unset",
+                    Err(_) => "unavailable",
+                }
+                .into(),
+            );
+            item.repo_bytes = project_disk(&project.config.repo).ok();
+            let services = project
+                .compose_ps()
+                .ok()
+                .and_then(|output| parse_compose_services(&output).ok());
+            item.drift = services
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|row| {
+                    drift(&project, &state, row).map(|_| safe_label(row.display_name()))
+                })
+                .collect();
+            item.runtime = services.as_ref().map(|rows| {
+                rows.iter()
+                    .map(|row| WebRuntime {
+                        service: safe_label(row.display_name()),
+                        state: if row.state.eq_ignore_ascii_case("running") {
+                            "running"
+                        } else if expected_finished_migration(&project, row) {
+                            "completed"
+                        } else {
+                            "stopped"
+                        },
+                        health: match row.health.to_ascii_lowercase().as_str() {
+                            "healthy" => "healthy",
+                            "unhealthy" => "unhealthy",
+                            "starting" => "starting",
+                            _ => "unknown",
+                        },
+                        image: if row.image.is_empty() {
+                            "unknown"
+                        } else if [
+                            state.current.as_ref(),
+                            state.previous.as_ref(),
+                            state.pending.as_ref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|release| {
+                            release.services.iter().any(|service| {
+                                service.name == row.display_name() && service.image == row.image
+                            }) || (release.services.is_empty()
+                                && row.image
+                                    == format!("{}:{}", project.config.image.name, release.tag))
+                        }) {
+                            "recorded"
+                        } else {
+                            "unrecorded"
+                        },
+                    })
+                    .collect()
+            });
+            let health: Vec<_> = snapshot
+                .services
+                .iter()
+                .filter(|row| row.project == name)
+                .collect();
+            item.verdict =
+                if overview_problem(&project, &state, services.as_deref(), &health, &item.drift) {
+                    "alert"
+                } else {
+                    "ok"
+                };
+            item
+        })
+        .collect()
+}
+
+fn safe_label(value: &str) -> String {
+    if value.len() <= 80
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        value.to_owned()
+    } else {
+        "(redacted)".to_owned()
+    }
+}
+
 // Local checkout only: Docker volumes and remote backups have no per-project size
 // in the existing data. Do not follow symlinks outside the checkout.
 fn project_disk(path: &Path) -> std::io::Result<u64> {
@@ -466,28 +674,7 @@ pub fn overview(projects_dir: &Path, state_dir: &Path) -> Result<()> {
             .iter()
             .filter(|item| item.project == name)
             .collect();
-        let problem = services.as_ref().map_or(true, |rows| {
-            rows.is_empty()
-                || rows.iter().any(|row| {
-                    !row.state.eq_ignore_ascii_case("running")
-                        && !expected_finished_migration(&project, row)
-                })
-                || project
-                    .config
-                    .compose
-                    .services
-                    .iter()
-                    .any(|name| !rows.iter().any(|row| row.display_name() == name))
-        }) || health.iter().any(|item| {
-            matches!(item.status, Health::Degraded | Health::Unhealthy)
-                || item.message == Some("Container unavailable")
-        }) || project.config.service_health.keys().any(|name| {
-            health
-                .iter()
-                .find(|item| item.service == *name)
-                .map_or(true, |item| item.status == Health::Unknown)
-        }) || !drifts.is_empty()
-            || state.pending.is_some();
+        let problem = overview_problem(&project, &state, services.as_deref(), &health, &drifts);
         let version = state
             .current
             .as_ref()
