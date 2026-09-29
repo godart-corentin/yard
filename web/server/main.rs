@@ -681,12 +681,7 @@ impl App {
                 .as_ref()
                 .and_then(|items| items.iter().find(|item| item.name == project.name))
                 .cloned();
-            project.status = match project.cli.as_ref().map(|item| item.verdict.as_str()) {
-                Some("ok") => "operational",
-                Some("alert") => "down",
-                _ => "unknown",
-            }
-            .into();
+            project.status = project_live_status(project).into();
             if !project.url_monitor {
                 project.error = match project.cli.as_ref().and_then(|item| item.reason.as_deref()) {
                     Some("state_unreadable") => Some("State unreadable".into()),
@@ -721,6 +716,58 @@ impl App {
                 .as_secs(),
             self.config.host_max_age_seconds,
         )
+    }
+}
+
+// CLI "alert" covers drift, pending releases and missing measurements as well as
+// failures. Only an explicit live health failure is Down; a host container
+// snapshot is never used to decide the project badge.
+fn project_live_status(project: &ProjectStatus) -> &'static str {
+    let cli = project.cli.as_ref();
+    if project.url_monitor {
+        if project.status == "down" {
+            return "down"; // Web HTTP sample failed, even if CLI is unavailable.
+        }
+        if cli.is_some_and(|item| {
+            item.verdict == "alert" && item.reason.as_deref() == Some("url_monitor")
+        }) {
+            return "down"; // The separate CLI URL sample failed.
+        }
+        if cli.is_some_and(|item| item.verdict == "alert") {
+            return if project.status == "operational" {
+                "degraded" // A non-health CLI alert alongside a successful Web sample.
+            } else {
+                "unknown" // No health sample and no explicit health failure.
+            };
+        }
+        return if project.status == "operational" {
+            "operational"
+        } else {
+            "unknown"
+        };
+    }
+    if cli.is_some_and(|item| {
+        item.runtime.as_ref().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.state == "stopped" || row.health == "unhealthy")
+        })
+    }) || project.uses_service_probes && project.status == "unhealthy"
+    {
+        return "down";
+    }
+    if project.uses_service_probes && project.status == "degraded" {
+        return "degraded";
+    }
+    let measured = cli
+        .is_some_and(|item| item.runtime.as_ref().is_some_and(|rows| !rows.is_empty()))
+        || project.uses_service_probes && project.status == "healthy";
+    if !measured {
+        return "unknown";
+    }
+    match cli.map(|item| item.verdict.as_str()) {
+        Some("alert") => "degraded",
+        Some("ok") => "operational",
+        _ => "unknown",
     }
 }
 
@@ -1592,6 +1639,63 @@ mod tests {
         }
     }
 
+    fn diagnostic(verdict: &str, runtime: Option<Vec<RuntimeView>>) -> Diagnostic {
+        Diagnostic {
+            name: "test".into(),
+            verdict: verdict.into(),
+            reason: None,
+            branch: None,
+            head: None,
+            env_tag: None,
+            runtime,
+            drift: vec![],
+            repo_bytes: None,
+            measured_at_unix: 0,
+        }
+    }
+
+    #[test]
+    fn alert_without_health_failure_is_not_down() {
+        let mut measured = project("unknown");
+        measured.cli = Some(diagnostic(
+            "alert",
+            Some(vec![RuntimeView {
+                service: "api".into(),
+                state: "running".into(),
+                health: "healthy".into(),
+                image: "recorded".into(),
+            }]),
+        ));
+        assert_eq!(project_live_status(&measured), "degraded");
+        measured.cli.as_mut().unwrap().runtime = None;
+        assert_eq!(project_live_status(&measured), "unknown");
+        assert_eq!(overall_status(&[project("unknown")]), "unknown");
+    }
+
+    #[test]
+    fn live_failure_is_down_but_missing_cli_is_unknown() {
+        let mut measured = project("unknown");
+        measured.cli = Some(diagnostic(
+            "alert",
+            Some(vec![RuntimeView {
+                service: "api".into(),
+                state: "stopped".into(),
+                health: "unknown".into(),
+                image: "unknown".into(),
+            }]),
+        ));
+        assert_eq!(project_live_status(&measured), "down");
+        measured.cli = None;
+        assert_eq!(project_live_status(&measured), "unknown");
+        measured.url_monitor = true;
+        measured.status = "down".into(); // Independent Web HTTP failure.
+        assert_eq!(project_live_status(&measured), "down");
+        measured.status = "operational".into();
+        measured.cli = Some(diagnostic("alert", None));
+        measured.cli.as_mut().unwrap().reason = Some("url_monitor".into());
+        assert_eq!(project_live_status(&measured), "down"); // CLI sample failed.
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1701,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn live_socket_verdict_overrides_cached_web_probes_for_monitors_and_compose() {
+    fn live_socket_separates_alerts_failures_and_missing_measurements() {
         use std::os::unix::net::UnixListener;
         let dir = temp_dir("socket-verdict");
         let socket = dir.join("read.sock");
@@ -1717,7 +1821,8 @@ mod tests {
                 .as_secs();
             let reply = serde_json::json!({"diagnostics":[
                 {"name":"monitor","verdict":"alert","reason":"url_monitor","branch":null,"head":null,"env_tag":null,"runtime":null,"drift":[],"repo_bytes":null,"measured_at_unix":now},
-                {"name":"demo","verdict":"ok","reason":null,"branch":"main","head":"abcd","env_tag":null,"runtime":[],"drift":[],"repo_bytes":0,"measured_at_unix":now}
+                {"name":"demo","verdict":"ok","reason":null,"branch":"main","head":"abcd","env_tag":null,"runtime":[],"drift":[],"repo_bytes":0,"measured_at_unix":now},
+                {"name":"reviewdesk","verdict":"alert","reason":null,"branch":"main","head":"abcd","env_tag":null,"runtime":[{"service":"api","state":"running","health":"healthy","image":"recorded"}],"drift":["api"],"repo_bytes":0,"measured_at_unix":now}
             ]});
             stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
         });
@@ -1741,19 +1846,24 @@ mod tests {
                 ProjectStatus {
                     name: "monitor".into(),
                     url_monitor: true,
-                    ..project("operational")
+                    ..project("down")
                 },
                 ProjectStatus {
                     name: "demo".into(),
                     ..project("down")
+                },
+                ProjectStatus {
+                    name: "reviewdesk".into(),
+                    ..project("unknown")
                 },
             ],
         };
         app.apply_cli(&mut payload);
         server.join().unwrap();
         assert_eq!(payload.projects[0].status, "down");
-        assert_eq!(payload.projects[1].status, "operational");
-        assert_eq!(payload.status, "degraded");
+        assert_eq!(payload.projects[1].status, "unknown");
+        assert_eq!(payload.projects[2].status, "degraded");
+        assert_eq!(payload.status, "down");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2226,7 +2336,7 @@ mod tests {
         }
         assert_eq!(exposed["load"]["value"], snapshot["load"]["value"]);
         assert_eq!(exposed["docker"]["value"], snapshot["docker"]["value"]);
-        assert_eq!(payload["projects"][0]["status"], "unknown");
+        assert_eq!(payload["projects"][0]["status"], "degraded");
         assert_eq!(payload["projects"][0]["services"][0]["latency_ms"], 42);
         assert!(
             payload["projects"][0]["services"][1]["age_seconds"]
@@ -2235,7 +2345,7 @@ mod tests {
                 >= 40
         );
         assert_eq!(payload["projects"][0]["services"][1]["status"], "degraded");
-        assert_eq!(payload["status"], "unknown");
+        assert_eq!(payload["status"], "degraded");
         assert!(!exposed.contains_key("secret"));
         fs::remove_dir_all(dir).unwrap();
     }
