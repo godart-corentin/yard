@@ -171,15 +171,45 @@ test('unreadable records are visibly invalid, never missing or successful', () =
   assert.match(byClass(unconfigured, 'backup-facts')[0].textContent, /Off-site copyInvalid backup record/)
 })
 
-test('stopped worker degrades its service; host reflects its own critical metrics', () => {
+test('host snapshot cannot override live project status; host keeps its own critical metrics', () => {
   const elements = dashboard()
   const cards = byClass(elements.projects, 'service-card')
   assert.deepEqual(cards.map(card => byClass(card, 'service-header')[0].children[1].textContent),
-    ['Degraded', 'Down'])
+    ['Operational', 'Down'])
   assert.equal(elements['host-badge'].textContent, 'Critical')
-  assert.equal(elements['operational-count'].textContent, '0')
-  assert.equal(elements['down-count'].textContent, '2')
-  assert.equal(elements['overall-badge'].textContent, 'Down')
+  assert.equal(elements['operational-count'].textContent, '1')
+  assert.equal(elements['down-count'].textContent, '1')
+  assert.equal(elements['overall-badge'].textContent, 'Degraded')
+})
+
+test('badge follows API status, not CLI alert or host snapshot', () => {
+  const elements = dashboard()
+  const context = {
+    document: { querySelector: selector => elements[selector.slice(1)], createElement: tag => new Element(tag) },
+    fetch: () => new Promise(() => {}), setInterval: () => {}, URL
+  }
+  vm.runInNewContext(`${source}\nglobalThis.renderForTest = render`, context)
+  const sample = structuredClone(payload)
+  sample.projects = [{ name: 'reviewdesk', status: 'degraded', url_monitor: false,
+    cli: { verdict: 'alert' } }]
+  sample.host.snapshot.containers = [
+    { project: 'reviewdesk', service: 'api', state: 'running', status: 'normal' },
+    { project: 'reviewdesk', service: 'migrate', state: 'exited', status: 'normal' }
+  ]
+  for (const [status, verdict, label] of [
+    ['degraded', 'alert', 'Degraded'],
+    ['down', 'alert', 'Down'],
+    ['unknown', null, 'Unknown']
+  ]) {
+    sample.projects[0].status = status
+    sample.projects[0].cli = verdict ? { verdict, runtime: null, drift: [] } : null
+    context.renderForTest(sample)
+    const badge = byClass(elements.projects, 'service-header')[0].children[1]
+    assert.equal(badge.textContent, label)
+    assert.equal(elements['overall-badge'].textContent, label)
+    assert.match(badge.className, new RegExp(status))
+    assert.match(elements['overall-badge'].className, new RegExp(status))
+  }
 })
 
 test('host contains CPU, load, RAM, disk and Docker with measurement age', () => {
