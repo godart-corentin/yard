@@ -746,6 +746,11 @@ fn project_live_status(project: &ProjectStatus) -> &'static str {
             "unknown"
         };
     }
+    // The host service snapshot may describe individual probes, but without a
+    // live CLI diagnosis it cannot establish the Compose project's badge.
+    if cli.is_none() {
+        return "unknown";
+    }
     if cli.is_some_and(|item| {
         item.runtime.as_ref().is_some_and(|rows| {
             rows.iter()
@@ -1687,6 +1692,12 @@ mod tests {
         assert_eq!(project_live_status(&measured), "down");
         measured.cli = None;
         assert_eq!(project_live_status(&measured), "unknown");
+        measured.uses_service_probes = true;
+        for status in ["healthy", "degraded", "unhealthy"] {
+            measured.status = status.into();
+            assert_eq!(project_live_status(&measured), "unknown");
+        }
+        measured.uses_service_probes = false;
         measured.url_monitor = true;
         measured.status = "down".into(); // Independent Web HTTP failure.
         assert_eq!(project_live_status(&measured), "down");
@@ -2336,7 +2347,7 @@ mod tests {
         }
         assert_eq!(exposed["load"]["value"], snapshot["load"]["value"]);
         assert_eq!(exposed["docker"]["value"], snapshot["docker"]["value"]);
-        assert_eq!(payload["projects"][0]["status"], "degraded");
+        assert_eq!(payload["projects"][0]["status"], "unknown");
         assert_eq!(payload["projects"][0]["services"][0]["latency_ms"], 42);
         assert!(
             payload["projects"][0]["services"][1]["age_seconds"]
@@ -2345,7 +2356,7 @@ mod tests {
                 >= 40
         );
         assert_eq!(payload["projects"][0]["services"][1]["status"], "degraded");
-        assert_eq!(payload["status"], "degraded");
+        assert_eq!(payload["status"], "unknown");
         assert!(!exposed.contains_key("secret"));
         fs::remove_dir_all(dir).unwrap();
     }
