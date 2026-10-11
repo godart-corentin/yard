@@ -68,14 +68,9 @@ const hostBadge = (status) => {
 }
 const formatBytes = (bytes) => `${(bytes / (1024 ** 3)).toFixed(1)} GiB`
 const level = (status) => ({ critical: 3, warning: 2, unknown: 1, normal: 0 }[status] ?? 1)
-const serviceState = (project, containers) => {
-  if (project.cli?.verdict === 'alert') return 'down'
-  if (project.cli?.verdict === 'ok') return 'operational'
-  if (project.url_monitor === false) return 'unknown'
-  if (project.status === 'down' || project.status === 'unhealthy') return project.status
-  if (containers.some((container) => container.status === 'critical')) return 'degraded'
-  return labels[project.status] ? project.status : 'unknown'
-}
+// The API already combines live CLI, Web probes and missing measurements.
+// Host containers are only a snapshot and must not override that verdict.
+const serviceState = (project) => labels[project.status] ? project.status : 'unknown'
 
 const renderHost = (host) => {
   hostMetricsEl.replaceChildren()
@@ -182,7 +177,7 @@ const renderProject = (project, containers) => {
   projectLink.href = `#/project/${encodeURIComponent(project.name)}/overview`
   projectLink.textContent = project.name || 'Unnamed service'
   name.append(projectLink)
-  header.append(name, statusBadge(serviceState(project, containers)))
+  header.append(name, statusBadge(serviceState(project)))
 
   const endpoints = document.createElement('div')
   endpoints.className = 'endpoints'
@@ -362,10 +357,9 @@ const renderProject = (project, containers) => {
   return card
 }
 
-const updateSummary = (payload, containers) => {
+const updateSummary = (payload) => {
   const projects = Array.isArray(payload.projects) ? payload.projects : []
-  const states = projects.map((project) => serviceState(project,
-    containers.filter((container) => container.project === project.name)))
+  const states = projects.map(serviceState)
   const operational = states.filter((state) => state === 'operational' || state === 'healthy').length
   const down = states.filter((state) => state === 'down' || state === 'unhealthy').length
   const attention = states.length - operational
@@ -389,7 +383,7 @@ const render = (payload) => {
   const projects = Array.isArray(payload.projects) ? payload.projects : []
   const snapshot = payload.host?.status === 'available' ? payload.host.snapshot : null
   const containers = snapshot?.containers || []
-  updateSummary({ ...payload, projects }, containers)
+  updateSummary({ ...payload, projects })
 
   projectsEl.replaceChildren()
   projectsEl.setAttribute('aria-busy', 'false')
@@ -424,7 +418,7 @@ const renderError = (error) => {
   downCountEl.classList.remove('bad')
   checkedAtEl.textContent = 'Unavailable'
   checkedAtEl.dateTime = ''
-  overallBadgeEl.className = 'badge down'
+  overallBadgeEl.className = 'badge unknown'
   overallBadgeEl.textContent = 'Unavailable'
 
   projectsEl.replaceChildren()
