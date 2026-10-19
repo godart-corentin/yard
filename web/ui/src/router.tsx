@@ -10,6 +10,9 @@ import { Placeholder } from "./components/Placeholder";
 import { HostPage } from "./host/HostPage";
 import { ImagesPage } from "./images/ImagesPage";
 import { OverviewPage } from "./overview/OverviewPage";
+import { OverviewTab } from "./project/OverviewTab";
+import { ProjectLayout } from "./project/ProjectLayout";
+import { ReleasesTab } from "./project/ReleasesTab";
 import { AppShell } from "./shell/AppShell";
 
 // Code-based routing: one flat route tree, easy to extend. Pages other than the
@@ -18,7 +21,7 @@ const rootRoute = createRootRoute({ component: AppShell });
 
 const overviewRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: OverviewPage });
 
-const projectRoute = createRoute({ getParentRoute: () => rootRoute, path: "/projects/$name" });
+const projectRoute = createRoute({ getParentRoute: () => rootRoute, path: "/projects/$name", component: ProjectPage });
 
 const projectIndexRoute = createRoute({
   getParentRoute: () => projectRoute,
@@ -28,12 +31,19 @@ const projectIndexRoute = createRoute({
   },
 });
 
+function ProjectPage() {
+  const { name } = projectRoute.useParams();
+  return <ProjectLayout name={name} />;
+}
+
 function projectTab(path: "overview" | "releases" | "logs" | "activity", title: string) {
   return createRoute({
     getParentRoute: () => projectRoute,
     path,
     component: function ProjectTab() {
       const { name } = projectRoute.useParams();
+      if (path === "overview") return <OverviewTab name={name} />;
+      if (path === "releases") return <ReleasesTab name={name} />;
       return <Placeholder title={name} subtitle={title} />;
     },
   });
