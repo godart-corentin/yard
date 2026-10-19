@@ -52,6 +52,7 @@ pub fn router(app: Shared) -> Router {
         .route("/assets/{name}", get(asset).fallback(method_not_allowed))
         .route("/favicon.svg", static_route("favicon.svg"))
         .fallback(fallback)
+        .layer(middleware::from_fn_with_state(app.clone(), api_gate))
         .layer(middleware::from_fn(security_headers))
         .with_state(app)
 }
@@ -123,6 +124,26 @@ async fn security_headers(request: Request, next: Next) -> Response {
         HeaderValue::from_static(CSP),
     );
     response
+}
+
+/// Every `/api` route (reads and the SSE stream included) needs the proxy token that Caddy
+/// injects after Basic Auth; `/healthz` and static files stay open. Without a configured token
+/// reads keep working (read-only dashboard) while mutations refuse themselves in `jobs.rs`.
+async fn api_gate(State(app): State<Shared>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let guarded = path == "/api" || path.starts_with("/api/");
+    if guarded {
+        if let Some(token) = app.config.proxy_token.as_deref() {
+            let provided = request
+                .headers()
+                .get("x-yard-proxy-token")
+                .map(HeaderValue::as_bytes);
+            if !provided.is_some_and(|value| jobs::constant_time_eq(token.as_bytes(), value)) {
+                return jobs::forbidden();
+            }
+        }
+    }
+    next.run(request).await
 }
 
 async fn method_not_allowed() -> Response {

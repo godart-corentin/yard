@@ -121,9 +121,10 @@ reverse_proxy yard-web:8088 {
 
 Yard Web trusts `X-Yard-User` **only** if `X-Yard-Proxy-Token` equals its `YARD_WEB_PROXY_TOKEN`
 (compared in constant time). The token stops any other container on the shared Docker network
-from forging an identity by talking to Web directly. If `YARD_WEB_PROXY_TOKEN` is unset, or the
-token is missing or wrong, every mutating request is `403 forbidden` (so a plain
-`docker run` of Web stays read-only). The user name is also validated as `[A-Za-z0-9._@-]{1,64}`.
+from forging an identity or reading anything by talking to Web directly: when `YARD_WEB_PROXY_TOKEN` is set, a
+missing or wrong token makes every `/api/*` request (GET and SSE included) `403 forbidden`; `/healthz` and
+static files stay open. If `YARD_WEB_PROXY_TOKEN` is unset, reads keep working (a plain `docker run` of Web
+is a read-only dashboard) and every mutating request is `403 forbidden`. The user name is also validated as `[A-Za-z0-9._@-]{1,64}`.
 The header and token are never echoed to the browser and never logged. `Job.actor` is the
 validated user name.
 

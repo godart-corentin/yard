@@ -172,12 +172,14 @@ restarts the units.
 
 ### Proxy identity
 
-Yard Web accepts a mutation only when the request carries the proxy token. Caddy adds it, and the user
+Yard Web serves every `/api/*` route (status, reads, job list and output, the SSE log stream and mutations)
+only when the request carries the proxy token; `/healthz` and the static UI files stay open. Caddy adds it, and the user
 name, to every proxied request. `header_up <name> <value>` **replaces** any value the client sent for
 that header (it only appends with a `+` prefix, which the installer does not use), so a browser cannot
 choose its own identity or supply the token. Web compares the token in constant time, validates the user
-name as `[A-Za-z0-9._@-]{1,64}`, and never echoes either value. With no `YARD_WEB_PROXY_TOKEN` configured,
-every mutation is refused: Web falls back to read-only.
+name as `[A-Za-z0-9._@-]{1,64}`, and never echoes either value. A missing or wrong token on `/api/*` is
+`403 forbidden`. With no `YARD_WEB_PROXY_TOKEN` configured (for example a plain `docker run`), the gate is off so
+the read-only dashboard keeps working (`GET /api/*` answers), while every mutation is still refused with `403`.
 
 The token protects against **other containers on the shared Caddy network** talking to `yard-web:8088`
 directly. Be aware where it lives: in clear in the Caddyfile (and so in Caddy's loaded configuration, which
@@ -280,8 +282,9 @@ reading status. Concretely:
   `same-origin` when present, and `Origin` must match the host. Browsers send Basic Auth credentials automatically,
   which is why these checks matter.
 - **The proxy token** (see above) stops containers on the Caddy network from forging an identity or bypassing
-  the Basic Auth. GET endpoints do not need the token: any container on that network can read status,
-  logs and job output without authenticating. Do not attach untrusted containers to the Caddy network.
+  the Basic Auth. Every `/api/*` route, GET and SSE included, requires it, so such a container cannot read
+  status, logs or job output either. Only `/healthz` and the static UI are open. Without a configured token
+  reads are open (read-only mode) and mutations are refused.
 - **Sockets**: the ops socket is mode 0660 in a 0750 directory owned by the dedicated `yard-web-ops` group. Only
   members of that group (the Web container) can start jobs. Anyone who can join that group, or compromise the
   `yard-web` process, can ask the executor for the same five actions, and nothing else.
