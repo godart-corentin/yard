@@ -1,0 +1,13 @@
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.sub {
+  margin: var(--space-1) 0 0;
+  color: var(--color-muted);
+  font-size: 13px;
+}

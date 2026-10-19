@@ -47,6 +47,12 @@
   --status-run-fg: #93c5fd;
   --status-run-dot: #60a5fa;
 
+  /* Attention banners */
+  --attention-warn-bg: #15120a;
+  --attention-warn-border: #4a3a14;
+  --attention-bad-bg: #170b0e;
+  --attention-bad-border: #4d1f29;
+
   /* Typography */
   --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
