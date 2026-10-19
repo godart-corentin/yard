@@ -94,7 +94,8 @@ read API, the UI shows only these generic messages, never raw backend text.
 | `404` | `not_found` | unknown job id |
 | `409` | `conflict` | a job already holds the project or global lock; `running_job_id` is set |
 | `503` | `executor_unavailable` | ops (or read, for log streams) socket missing, refused or timed out |
-| `500` | `failed` | unexpected Web error |
+| `429` | `refused` | too many concurrent SSE streams (4 log streams, 32 job output streams per Web instance); retry later |
+| `500` | `failed` | unexpected Web error, or an executor `internal` error |
 
 ### CSRF and identity
 
@@ -196,8 +197,7 @@ Replies:
 ```
 
 `start` returns as soon as the job is accepted and persisted as `queued`/`running`; it never waits
-for completion. Web maps `refused` -> 400, `conflict` -> 409 (copying `running_job_id`), anything
-else or a connection failure -> 503/500 as in the error table. `message` is for logs, never shown to browsers.
+for completion. Web maps `refused` -> 400, `conflict` -> 409 (copying `running_job_id`), `internal` -> 500; a connection failure, timeout or malformed reply -> 503. `message` is for logs, never shown to browsers.
 
 The executor trusts nothing from the request beyond what the allowlist accepts:
 
