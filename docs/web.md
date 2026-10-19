@@ -87,7 +87,7 @@ The installer:
 3. asks for a Basic Auth password (username defaults to `yard`);
 4. stores only Caddy's password hash in the Caddyfile;
 5. mounts `/etc/yard/projects` and `/var/lib/yard` read-only into `yard-web`;
-6. builds the Rust `yard-web` binary from the installed web source;
+6. builds the React frontend (Node) and the Rust `yard-web` binary from the installed web source, in a multi-stage Docker build;
 7. starts the `yard-web` container as an unprivileged user;
 8. validates and reloads Caddy.
 

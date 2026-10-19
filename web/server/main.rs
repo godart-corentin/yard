@@ -2349,7 +2349,7 @@ mod tests {
         assert!(index
             .to_ascii_lowercase()
             .contains("cache-control: no-cache"));
-        // Static files are a closed list; nothing else in the directory is served.
+        // Only index.html, favicon.svg and /assets/<name> are served from the directory.
         for path in [
             "/secret.txt",
             "/app.js",
@@ -2369,6 +2369,80 @@ mod tests {
             );
             assert!(response.starts_with("HTTP/1.1 405"), "{path}: {response}");
             assert!(response.ends_with("Method not allowed\n"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn serves_react_build_with_asset_caching_and_spa_fallback() {
+        let dir = temp_dir("spa");
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        fs::write(dir.join("index.html"), "<div id=root></div>").unwrap();
+        fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
+        fs::write(dir.join("assets/index-abc123.js"), "console.log(1)").unwrap();
+        fs::write(dir.join("assets/plex-abc.woff2"), "font").unwrap();
+        fs::write(dir.join("secret.txt"), "private").unwrap();
+        let app = Arc::new(
+            App::new(Config {
+                host: "127.0.0.1".into(),
+                port: 0,
+                projects_dir: dir.clone(),
+                state_dir: dir.clone(),
+                static_dir: dir.clone(),
+                check_timeout: Duration::from_secs(1),
+                cache_duration: Duration::from_secs(1),
+                host_max_age_seconds: 300,
+                read_socket: dir.join("missing.sock"),
+                ops_socket: dir.join("missing-ops.sock"),
+                proxy_token: None,
+            })
+            .unwrap(),
+        );
+        let asset = read_api_http(&app, "/assets/index-abc123.js").to_ascii_lowercase();
+        assert!(asset.starts_with("http/1.1 200"), "{asset}");
+        assert!(asset.contains("cache-control: public, max-age=31536000, immutable"));
+        assert!(asset.contains("content-type: text/javascript"));
+        assert!(asset.contains("content-security-policy: default-src 'self'"));
+        assert!(read_api_http(&app, "/assets/plex-abc.woff2")
+            .to_ascii_lowercase()
+            .contains("content-type: font/woff2"));
+        assert!(read_api_http(&app, "/favicon.svg").contains("<svg/>"));
+
+        // Client-side routes get index.html without caching; deep links included.
+        for path in [
+            "/",
+            "/projects/hello-api/logs",
+            "/activity/0198",
+            "/images",
+            "/host?x=1",
+        ] {
+            let response = read_api_http(&app, path);
+            assert!(response.starts_with("HTTP/1.1 200"), "{path}: {response}");
+            assert!(response.contains("<div id=root></div>"), "{path}");
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains("cache-control: no-cache"),
+                "{path}"
+            );
+        }
+        // API paths, missing assets, files and traversal never fall back to index.html.
+        for path in [
+            "/api",
+            "/api/nope",
+            "/api/jobs-missing/x",
+            "/assets/missing.js",
+            "/assets/",
+            "/assets/..%2fsecret.txt",
+            "/assets/%2e%2e%2fsecret.txt",
+            "/assets/.hidden",
+            "/assets/a/b.js",
+            "/secret.txt",
+            "/%2e%2e/secret.txt",
+        ] {
+            let response = read_api_http(&app, path);
+            assert!(response.starts_with("HTTP/1.1 404"), "{path}: {response}");
+            assert!(!response.contains("private") && !response.contains("<div id=root>"));
         }
         fs::remove_dir_all(dir).unwrap();
     }

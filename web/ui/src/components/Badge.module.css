@@ -1,0 +1,25 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ok { background: var(--status-ok-bg); color: var(--status-ok-fg); }
+.warn { background: var(--status-warn-bg); color: var(--status-warn-fg); }
+.bad { background: var(--status-bad-bg); color: var(--status-bad-fg); }
+.unk { background: var(--status-unk-bg); color: var(--status-unk-fg); }
+.run { background: var(--status-run-bg); color: var(--status-run-fg); }

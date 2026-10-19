@@ -1,0 +1,23 @@
+.card {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.warn {
+  background: var(--attention-warn-bg);
+  border-color: var(--attention-warn-border);
+}
+
+.bad {
+  background: var(--attention-bad-bg);
+  border-color: var(--attention-bad-border);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 14px 18px;
+}
