@@ -8,7 +8,9 @@ mod error;
 mod health;
 mod host;
 mod images;
+mod jobs;
 mod monitor;
+mod ops_server;
 mod project;
 mod read_server;
 mod restore;
@@ -59,6 +61,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Command::ReadServer { socket } => read_server::serve(&socket, &projects_dir, &state_dir)?,
+        Command::OpsServer { socket } => ops_server::serve(&socket, &projects_dir, &state_dir)?,
         Command::List => {
             for name in Project::list(&projects_dir)? {
                 println!("{name}");
