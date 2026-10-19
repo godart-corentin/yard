@@ -6,7 +6,9 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 
+import { PageHeader } from "./components/PageHeader";
 import { Placeholder } from "./components/Placeholder";
+import { LogsTab } from "./logs/LogsTab";
 import { OverviewPage } from "./overview/OverviewPage";
 import { AppShell } from "./shell/AppShell";
 
@@ -32,6 +34,15 @@ function projectTab(path: "overview" | "releases" | "logs" | "activity", title: 
     path,
     component: function ProjectTab() {
       const { name } = projectRoute.useParams();
+      // Temporary header: ProjectLayout (T4) provides it, drop it when that lands.
+      if (path === "logs") {
+        return (
+          <>
+            <PageHeader title={name} subtitle={title} />
+            <LogsTab project={name} />
+          </>
+        );
+      }
       return <Placeholder title={name} subtitle={title} />;
     },
   });
