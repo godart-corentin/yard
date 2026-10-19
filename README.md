@@ -284,7 +284,7 @@ The installer:
 
 The installer also requires systemd and the updated Yard CLI. It starts two host-side services, each on a group-restricted Unix socket that the Web container only gets as a bind of the socket directory (the container still has no Docker socket):
 
-- `yard-web-read.service` (`yard read-server`): sandboxed, allowlisted, bounded reads (logs, restore points, image inventory). It runs as root only to read mode-0600 state and Compose environment files.
+- `yard-web-read.service` (`yard read-server`): sandboxed, allowlisted, bounded reads (logs, restore points, image inventory). It runs as root with only `CAP_DAC_READ_SEARCH` (read, never write, the deploy user's state and Compose environment files) and network access for URL monitor checks.
 - `yard-web-ops.service` (`yard ops-server`): starts the job actions. It runs as root with **relaxed** hardening (network access, `ProtectSystem=full`, a few capabilities) because deployments, backups and restores cannot work without it. Web and the executor both reject everything outside the five allowlisted actions, and commands are built from fixed templates with no shell.
 
 Treat the Basic Auth credentials and the host executors as root-level operational access, and keep `/etc/yard/projects` writable by trusted administrators only.
@@ -383,7 +383,7 @@ Deployment state is stored as JSON under:
 /var/lib/yard/<project>.json
 ```
 
-The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or restore uses that release. Writes remain atomic; new state files are mode `0600` and updates preserve the existing mode. Restore snapshots of Compose `.env` may contain application secrets: protect the state directory and its `0600` snapshots accordingly.
+The state contains only deployment metadata: Git revisions, service names and image/tag references, timestamps, statuses (`active`, `superseded`, `activating`) and the previous release. Existing state files with only `revision`, `tag`, and `deployed_at_unix` remain readable; missing service metadata is populated from Compose when a deployment or restore uses that release. Writes remain atomic; new state files are mode `0640` (readable by Yard Web through the state directory's group) and updates preserve the existing mode; an older `0600` state file stays unreadable by Yard Web until you `chmod 640` it. Restore snapshots of Compose `.env` may contain application secrets: protect the state directory and its `0600` snapshots accordingly.
 
 ## Security
 

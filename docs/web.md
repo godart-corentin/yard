@@ -107,8 +107,10 @@ yard-web     read-only mounts, no Docker socket, unprivileged, read-only root fi
 - **yard-web** (Rust, axum) serves the React build, the status and read APIs, the jobs API and the
   Server-Sent Events streams. It never runs a command itself.
 - **Read executor** (`yard-web-read.service`): bounded, allowlisted reads (`images`, `images-prune-plan`,
-  `logs`, `logs-follow`, `restore-points`, `restore-log`). Sandboxed (read-only filesystem, no
-  capabilities, private network), runs as root only to read mode-0600 state and reach Docker.
+  `logs`, `logs-follow`, `restore-points`, `restore-log`). Sandboxed (read-only filesystem,
+  only `CAP_DAC_READ_SEARCH`), runs as root to reach Docker; that capability lets it read the deploy
+  user's mode-0600 state and Compose `.env` files without being able to write anything. It has
+  network access so the CLI checks can sample the health URLs of URL monitors.
 - **Ops executor** (`yard-web-ops.service`, `yard ops-server`): starts the five job actions above. It
   accepts a closed set of actions and builds each command line from a fixed template, so the request
   cannot choose a command or free-form arguments. See "Security" for its privileges.

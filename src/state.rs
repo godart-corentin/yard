@@ -99,9 +99,12 @@ impl ProjectState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        atomic_file::write(
+        // Group-readable: Yard Web reads the state through its read-only mount with the
+        // state directory's group; nothing in it is a secret, but others need no access.
+        atomic_file::write_with_mode(
             path,
             format!("{}\n", serde_json::to_string_pretty(self)?).as_bytes(),
+            0o640,
         )
     }
 }
@@ -123,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn preexisting_temp_file_is_not_followed_and_state_is_private() {
+    fn preexisting_temp_file_is_not_followed_and_state_is_group_readable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/state-test");
         fs::create_dir_all(&root).unwrap();
         let path = root.join(format!("{}.json", std::process::id()));
@@ -133,7 +136,7 @@ mod tests {
         ProjectState::default().save(&path).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            0o640
         );
         assert_eq!(fs::read_to_string(&tmp).unwrap(), "stale");
         fs::remove_file(tmp).unwrap();
@@ -146,11 +149,11 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("state.json");
         fs::write(&path, "{}\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         ProjectState::default().save(&path).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o640
+            0o644
         );
         fs::remove_dir_all(root).unwrap();
     }
