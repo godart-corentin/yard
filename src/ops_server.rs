@@ -795,7 +795,11 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(error) => eprintln!("yard ops executor accept error: {error}"),
+            Err(error) => {
+                eprintln!("yard ops executor accept error: {error}");
+                // EMFILE and friends repeat immediately: do not spin on them.
+                thread::sleep(read_server::ACCEPT_BACKOFF);
+            }
         }
     }
     Err(YardError::Config("ops listener closed".into()))

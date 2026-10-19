@@ -22,6 +22,8 @@ use crate::status;
 
 const MAX_REQUEST: u64 = 1024;
 const MAX_OUTPUT: u64 = 128 * 1024;
+/// Pause after a failed `accept`, shared with the ops executor.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_FOLLOWS: usize = 4;
 const FOLLOW_LIMIT: Duration = Duration::from_secs(3600);
@@ -448,7 +450,11 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
                     eprintln!("yard read executor request error: {error}");
                 }
             }
-            Err(error) => eprintln!("yard read executor accept error: {error}"),
+            Err(error) => {
+                eprintln!("yard read executor accept error: {error}");
+                // EMFILE and friends repeat immediately: do not spin on them.
+                thread::sleep(ACCEPT_BACKOFF);
+            }
         }
     }
     Ok(())
