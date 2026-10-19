@@ -81,3 +81,13 @@
   font-size: var(--text-sm);
   color: var(--color-muted);
 }
+
+.pill {
+  margin-left: auto;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--status-run-bg);
+  color: var(--status-run-fg);
+  font-size: 11.5px;
+  line-height: 20px;
+}

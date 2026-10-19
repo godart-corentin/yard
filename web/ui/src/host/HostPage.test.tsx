@@ -17,7 +17,7 @@ describe("Host page", () => {
     expect(screen.getByText(/Snapshot 42 s ago · collected/)).toBeInTheDocument();
     expect(screen.getByText("Healthy")).toBeInTheDocument();
     expect(screen.getByText("/")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Collect now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Collect now" })).toBeInTheDocument();
   });
 
   it("flags a disk warning and lists containers", async () => {

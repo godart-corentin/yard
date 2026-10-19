@@ -3,11 +3,11 @@ import type { MouseEvent } from "react";
 
 import type { ProjectStatus } from "../api";
 import { Badge } from "../components/Badge";
+import { DeployButton } from "../actions/DeployButton";
 import { ButtonLink } from "../components/Button";
 import { Card, CardHeader } from "../components/Card";
 import { Chip } from "../components/Chip";
 import { EmptyState } from "../components/EmptyState";
-import { Icon } from "../components/Icon";
 import { StatusDot } from "../components/StatusDot";
 import { Table, Td, Th } from "../components/Table";
 import { projectLabel, projectTone } from "../lib/tone";
@@ -23,6 +23,8 @@ function Row({ project, nowMs }: { project: ProjectStatus; nowMs: number }) {
 
   // The whole row opens the project, but real links and buttons keep their own behavior.
   const open = (event: MouseEvent) => {
+    // Portaled dialogs bubble React events through the row; only clicks inside the row count.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     if ((event.target as HTMLElement).closest("a, button")) return;
     void navigate({ to: "/projects/$name/overview", params: { name: project.name } });
   };
@@ -71,16 +73,7 @@ function Row({ project, nowMs }: { project: ProjectStatus; nowMs: number }) {
             <ButtonLink size="sm" to="/projects/$name/logs" params={{ name: project.name }} aria-label={`Logs ${project.name}`}>
               Logs
             </ButtonLink>{" "}
-            {/* Confirmation and job start arrive with the actions task; for now it opens the project. */}
-            <ButtonLink
-              size="sm"
-              to="/projects/$name/overview"
-              params={{ name: project.name }}
-              aria-label={`Deploy ${project.name}`}
-            >
-              <Icon name="deploy" size={14} />
-              Deploy
-            </ButtonLink>
+            <DeployButton project={project} label="Deploy" size="sm" variant="default" />
           </>
         )}
       </Td>

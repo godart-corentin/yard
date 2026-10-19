@@ -55,7 +55,7 @@ describe("Overview", () => {
     for (const service of ["api", "worker", "migrate"]) expect(r.getByText(service)).toBeInTheDocument();
     expect(r.getByText("Today 11:00")).toBeInTheDocument();
     expect(r.getByRole("link", { name: "Logs hello-api" })).toHaveAttribute("href", "/projects/hello-api/logs");
-    expect(r.getByRole("link", { name: "Deploy hello-api" })).toHaveAttribute("href", "/projects/hello-api/overview");
+    expect(r.getByRole("button", { name: "Deploy hello-api" })).toBeEnabled();
   });
 
   it("raises a banner for a degraded service and counts it as needing attention", async () => {
@@ -110,6 +110,7 @@ describe("Overview", () => {
     expect(r.getByText("not deployed by Yard")).toBeInTheDocument();
     expect(r.getByText("Monitor only")).toBeInTheDocument();
     expect(r.queryByRole("link", { name: /Logs|Deploy/ })).not.toBeInTheDocument();
+    expect(r.queryByRole("button", { name: /Deploy/ })).not.toBeInTheDocument();
     expect(screen.getByText("0 deployable · 1 URL monitor")).toBeInTheDocument();
   });
 

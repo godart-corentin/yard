@@ -1,3 +1,5 @@
+import { Link } from "@tanstack/react-router";
+
 import { Badge } from "../components/Badge";
 import { ButtonLink } from "../components/Button";
 import { Card, CardHeader } from "../components/Card";
@@ -35,7 +37,9 @@ export function RecentActivity({ nowMs }: { nowMs: number }) {
                   {state.label}
                 </Badge>
                 <div className={styles.text}>
-                  <strong>{jobTitle(job)}</strong> {detail && <span className="muted">{detail}</span>}
+                  <Link to="/activity/$jobId" params={{ jobId: job.id }} className={styles.link}>
+                    <strong>{jobTitle(job)}</strong>
+                  </Link> {detail && <span className="muted">{detail}</span>}
                 </div>
                 <span className={`muted ${styles.meta}`}>
                   {job.actor} · {formatWhen(job.created_at_unix, nowMs)}

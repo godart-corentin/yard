@@ -50,7 +50,7 @@ describe("Project overview tab", () => {
     expect(screen.getByRole("heading", { level: 1, name: "hello-api" })).toBeInTheDocument();
     expect(screen.getByText("Operational")).toBeInTheDocument();
     expect(screen.getByText(/branch main/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Deploy main" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Deploy / })).toHaveTextContent("Deploy main");
     const tabs = within(screen.getByRole("navigation", { name: "Project views" }));
     expect(tabs.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
     expect(tabs.getAllByRole("link")).toHaveLength(4);

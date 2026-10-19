@@ -44,7 +44,7 @@ describe("Images page", () => {
     expect(within(await stat("In use")).getByText("1")).toBeInTheDocument();
     expect(within(await stat("Protected")).getByText("2")).toBeInTheDocument();
     expect(within(await stat("Reclaimable")).getByText("2 MB")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Simulate prune…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Simulate prune…" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Re-run inventory" }));
     await vi.waitFor(() => expect(fn.mock.calls.filter(([u]) => String(u).includes("op=images")).length).toBe(2));
   });
