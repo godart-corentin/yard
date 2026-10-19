@@ -1,0 +1,13 @@
+.dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.ok { background: var(--status-ok-dot); }
+.warn { background: var(--status-warn-dot); }
+.bad { background: var(--status-bad-dot); }
+.unk { background: var(--status-unk-dot); }
+.run { background: var(--status-run-dot); }

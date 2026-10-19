@@ -23,8 +23,12 @@ CADDYFILE="$(
 [[ -f "$CADDYFILE" ]] || die "cannot locate host Caddyfile mount"
 
 BACKUP_DIR="${YARD_ROOT}/backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${YARD_ROOT}/backups"
+chmod 0700 "${YARD_ROOT}/backups"
 mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
 cp "$CADDYFILE" "$BACKUP_DIR/Caddyfile"
+chmod 0600 "$BACKUP_DIR/Caddyfile"
 
 TMP_CADDYFILE="$(mktemp)"
 trap 'rm -f "$TMP_CADDYFILE"' EXIT
@@ -65,5 +69,15 @@ if [[ -f /etc/systemd/system/yard-web-read.service ]] \
   rm -f /etc/systemd/system/yard-web-read.service
   systemctl daemon-reload
 fi
+
+if [[ -f /etc/systemd/system/yard-web-ops.service ]] \
+  && grep -Fq '# Yard Web ops executor' /etc/systemd/system/yard-web-ops.service; then
+  systemctl disable --now yard-web-ops.service
+  rm -f /etc/systemd/system/yard-web-ops.service
+  systemctl daemon-reload
+fi
+
+# The proxy token only exists to pair Caddy with yard-web: drop it with the Caddy block.
+rm -f "${YARD_ROOT}/web.env" "${YARD_ROOT}/web.env.new"
 
 echo "Yard Web removed. Yard CLI configuration and state were left untouched."

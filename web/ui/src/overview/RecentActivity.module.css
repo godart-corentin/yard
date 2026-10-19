@@ -1,0 +1,39 @@
+.feed {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: var(--space-3) 18px;
+  border-top: 1px solid var(--color-border);
+}
+
+.badge {
+  min-width: 86px;
+}
+
+.text {
+  flex: 1 1 300px;
+  min-width: 0;
+}
+
+.text strong {
+  font-weight: 600;
+}
+
+.meta {
+  font-size: var(--text-sm);
+}
+
+.link {
+  text-decoration: none;
+}
+
+.link:hover strong {
+  text-decoration: underline;
+}

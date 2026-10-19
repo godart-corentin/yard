@@ -1,3 +1,11 @@
+FROM node:22-alpine AS ui
+
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui ./
+RUN npm run build
+
 FROM rust:1.88-alpine AS builder
 
 RUN apk add --no-cache musl-dev
@@ -14,7 +22,7 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /opt/yard
 
 COPY --from=builder /build/target/release/yard-web /usr/local/bin/yard-web
-COPY static /opt/yard/static
+COPY --from=ui /ui/dist /opt/yard/static
 
 ENV YARD_WEB_HOST=0.0.0.0 \
     YARD_WEB_PORT=8088 \

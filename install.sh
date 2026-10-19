@@ -37,10 +37,17 @@ fi
 "${SUDO[@]}" install -d -o root -g root -m 755 /usr/local/share/yard
 "${SUDO[@]}" rm -rf /usr/local/share/yard/web-src
 "${SUDO[@]}" cp -R "$ROOT_DIR/web" /usr/local/share/yard/web-src
-"${SUDO[@]}" rm -rf /usr/local/share/yard/web-src/target
+"${SUDO[@]}" rm -rf /usr/local/share/yard/web-src/target /usr/local/share/yard/web-src/ui/node_modules /usr/local/share/yard/web-src/ui/dist
 "${SUDO[@]}" chown -R root:root /usr/local/share/yard/web-src
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type d -exec chmod 0755 {} +
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type f -exec chmod 0644 {} +
 
+"${SUDO[@]}" rm -rf /usr/local/share/yard/ops-src
+"${SUDO[@]}" cp -R "$ROOT_DIR/ops" /usr/local/share/yard/ops-src
+"${SUDO[@]}" chown -R root:root /usr/local/share/yard/ops-src
+"${SUDO[@]}" find /usr/local/share/yard/ops-src -type d -exec chmod 0755 {} +
+"${SUDO[@]}" find /usr/local/share/yard/ops-src -type f -exec chmod 0644 {} +
+
 echo "Yard installed to /usr/local/bin/yard"
 echo "Yard Web source installed to /usr/local/share/yard/web-src"
+echo "Yard Web ops executor files installed to /usr/local/share/yard/ops-src"

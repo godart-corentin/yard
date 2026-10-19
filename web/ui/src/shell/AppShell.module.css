@@ -1,0 +1,28 @@
+/* The sidebar and main column wrap onto separate rows on narrow screens. */
+.app {
+  display: flex;
+  flex-wrap: wrap;
+  min-height: 100vh;
+}
+
+.main {
+  flex: 999 1 560px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: var(--content-max);
+  padding: 28px var(--space-6) 48px;
+}
+
+@media (max-width: 640px) {
+  .content {
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+}

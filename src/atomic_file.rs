@@ -8,6 +8,11 @@ use crate::error::{Result, YardError};
 // The temporary file lives beside its destination so rename cannot cross filesystems.
 // A random suffix prevents guessing; create_new also prevents following a planted link.
 pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
+    write_with_mode(path, contents, 0o600)
+}
+
+// A new file gets `mode`; an existing destination keeps its own permissions.
+pub fn write_with_mode(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| YardError::Config(format!("invalid file path: {}", path.display())))?;
@@ -46,7 +51,7 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
                 file.set_permissions(permissions)?;
             } else {
                 // An explicit mode is necessary even when the umask is permissive.
-                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                file.set_permissions(fs::Permissions::from_mode(mode))?;
             }
             file.sync_all()?;
             fs::rename(&tmp, path)?;

@@ -1,0 +1,4 @@
+.body {
+  padding: var(--space-5) 18px;
+  color: var(--color-muted);
+}

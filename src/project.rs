@@ -22,6 +22,11 @@ impl Project {
                 "project name 'host' is reserved for the host snapshot".into(),
             ));
         }
+        if name.starts_with('-') {
+            return Err(YardError::Config(
+                "project names cannot start with '-'".into(),
+            ));
+        }
         let path = projects_dir.join(format!("{name}.toml"));
         if !path.is_file() {
             return Err(YardError::ProjectNotFound(name.to_owned()));
@@ -46,7 +51,7 @@ impl Project {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                if stem == "host" {
+                if stem == "host" || stem.starts_with('-') {
                     continue;
                 }
                 names.push(stem.to_owned());

@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -12,6 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+mod api_types;
+mod http;
+mod jobs;
 
 #[derive(Clone)]
 struct Config {
@@ -24,6 +27,9 @@ struct Config {
     cache_duration: Duration,
     host_max_age_seconds: u64,
     read_socket: PathBuf,
+    ops_socket: PathBuf,
+    /// Shared secret the trusted reverse proxy sends; unset keeps Web read-only.
+    proxy_token: Option<String>,
 }
 
 impl Config {
@@ -44,6 +50,12 @@ impl Config {
                 "YARD_WEB_READ_SOCKET",
                 "/run/yard-web-read/read.sock",
             )),
+            ops_socket: PathBuf::from(env_value(
+                "YARD_WEB_OPS_SOCKET",
+                "/run/yard-web-ops/ops.sock",
+            )),
+            proxy_token: Some(env_value("YARD_WEB_PROXY_TOKEN", ""))
+                .filter(|value| !value.is_empty()),
         })
     }
 }
@@ -78,14 +90,18 @@ struct WebBackup {
     offsite_command: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct BackupAttempt {
+    #[ts(type = "number")]
     started_at_unix: u64,
+    #[ts(type = "number")]
     duration_ms: u128,
     result: BackupResult,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 #[serde(rename_all = "lowercase")]
 enum BackupResult {
     Success,
@@ -93,14 +109,16 @@ enum BackupResult {
 }
 
 // Keep unreadable records visible without exposing their raw contents through the API.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 #[serde(untagged)]
 enum BackupRecord {
     Attempt(BackupAttempt),
     Invalid(InvalidBackup),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct InvalidBackup {
     result: &'static str,
 }
@@ -127,7 +145,8 @@ struct Project {
     config_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct ProjectStatus {
     #[serde(serialize_with = "serialize_label")]
     name: String,
@@ -136,6 +155,7 @@ struct ProjectStatus {
     url_monitor: bool,
     // A monitor URL may contain tokens in its path or query; keep it server-side.
     #[serde(skip_serializing)]
+    #[ts(skip)]
     health_url: Option<String>,
     services: Vec<ServiceHealth>,
     #[serde(skip)]
@@ -152,13 +172,15 @@ struct ProjectStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
     checked_at: String,
+    #[ts(type = "number | null")]
     latency_ms: Option<u128>,
     http_status: Option<u16>,
     status: String,
     error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/src/api/types/")]
 struct StatusPayload {
     status: String,
     checked_at: String,
@@ -166,11 +188,13 @@ struct StatusPayload {
     host: HostStatus,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct ReleaseView {
     record_status: &'static str,
     tag: Option<String>,
     revision: Option<String>,
+    #[ts(type = "number | null")]
     deployed_at_unix: Option<u64>,
     status: Option<String>,
     services: Vec<ReleaseServiceView>,
@@ -189,7 +213,8 @@ impl ReleaseView {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct ReleaseServiceView {
     name: String,
     image: String,
@@ -214,15 +239,18 @@ struct RecordedService {
     image: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct RestorePoint {
     position: &'static str,
     id: String,
+    #[ts(type = "number")]
     deployed_at_unix: u64,
     status: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct Diagnostic {
     name: String,
     verdict: String,
@@ -232,10 +260,13 @@ struct Diagnostic {
     env_tag: Option<String>,
     runtime: Option<Vec<RuntimeView>>,
     drift: Vec<String>,
+    #[ts(type = "number | null")]
     repo_bytes: Option<u64>,
+    #[ts(type = "number")]
     measured_at_unix: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct RuntimeView {
     service: String,
     state: String,
@@ -244,14 +275,16 @@ struct RuntimeView {
 }
 
 // Deserialize only the public, versioned snapshot fields. Never proxy arbitrary JSON from disk.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostMetric<T> {
     value: Option<T>,
     status: HostLevel,
     message: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 #[serde(rename_all = "lowercase")]
 enum HostLevel {
     Normal,
@@ -260,31 +293,40 @@ enum HostLevel {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostThresholds {
     disk_warn_percent: u8,
     disk_crit_percent: u8,
     mem_pressure_percent: u8,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostMemory {
+    #[ts(type = "number")]
     used_bytes: u64,
+    #[ts(type = "number")]
     total_bytes: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostDisk {
     #[serde(deserialize_with = "safe_mount")]
     mount: String,
+    #[ts(type = "number")]
     used_bytes: u64,
+    #[ts(type = "number")]
     total_bytes: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostDocker {
     images: String,
     containers: String,
     volumes: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostContainer {
     project: String,
     service: String,
@@ -293,24 +335,31 @@ struct HostContainer {
 }
 
 // Explicit allowlist: never forward arbitrary snapshot or manifest fields.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct ServiceHealth {
     project: String,
     service: String,
     status: ServiceLevel,
     kind: Option<String>,
+    #[ts(type = "number | null")]
     latency_ms: Option<u64>,
+    #[ts(type = "number | null")]
     age_seconds: Option<u64>,
     #[serde(default, skip_serializing)]
+    #[ts(type = "number | null")]
     heartbeat_at_unix: Option<u64>,
     #[serde(default, skip_serializing)]
+    #[ts(type = "number | null")]
     max_age_seconds: Option<u64>,
     #[serde(default, skip_serializing)]
+    #[ts(type = "number | null")]
     crit_multiplier: Option<u64>,
     message: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 #[serde(rename_all = "lowercase")]
 enum ServiceLevel {
     Healthy,
@@ -319,9 +368,11 @@ enum ServiceLevel {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostSnapshot {
     version: u8,
+    #[ts(type = "number")]
     collected_at_unix: u64,
     thresholds: HostThresholds,
     cpu: HostMetric<f64>,
@@ -336,9 +387,11 @@ struct HostSnapshot {
     services: Vec<ServiceHealth>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export_to = "../ui/src/api/types/")]
 struct HostStatus {
     status: &'static str,
+    #[ts(type = "number | null")]
     age_seconds: Option<u64>,
     snapshot: Option<HostSnapshot>,
     message: &'static str,
@@ -617,6 +670,7 @@ struct App {
     config: Config,
     client: Client,
     cache: Mutex<Cache>,
+    streams: jobs::Streams,
 }
 
 impl App {
@@ -633,6 +687,7 @@ impl App {
                 value: None,
                 valid_until: Instant::now(),
             }),
+            streams: jobs::Streams::default(),
         })
     }
 
@@ -1281,10 +1336,8 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
         }
     }
     let op = params.remove("op")?;
-    if op == "images" {
-        return params
-            .is_empty()
-            .then(|| serde_json::json!({"op": "images"}));
+    if matches!(op.as_str(), "images" | "images-prune-plan") {
+        return params.is_empty().then(|| serde_json::json!({"op": op}));
     }
     if !matches!(op.as_str(), "logs" | "restore-points" | "restore-log") {
         return None;
@@ -1292,6 +1345,7 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
     let project = params.remove("project")?;
     if project.is_empty()
         || project.len() > 64
+        || project.starts_with('-')
         || !project
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -1309,10 +1363,7 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
             .then(|| serde_json::json!({"op": op, "project": project}));
     }
     let service = params.remove("service");
-    if service
-        .as_deref()
-        .is_some_and(|name| !selected.service_names.iter().any(|valid| valid == name))
-    {
+    if !valid_service(selected, service.as_deref()) {
         return None;
     }
     let tail = params
@@ -1324,20 +1375,28 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
         return None;
     }
     let since = params.remove("since");
-    if since.as_deref().is_some_and(|value| {
-        value.is_empty()
-            || value.len() > 40
-            || !value.bytes().all(|byte| {
+    if !valid_since(since.as_deref()) {
+        return None;
+    }
+    params.is_empty().then(|| serde_json::json!({"op": op, "project": project, "service": service, "tail": tail, "since": since}))
+}
+
+fn valid_service(project: &Project, service: Option<&str>) -> bool {
+    service.is_none_or(|name| project.service_names.iter().any(|valid| valid == name))
+}
+
+fn valid_since(since: Option<&str>) -> bool {
+    since.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 40
+            && value.bytes().all(|byte| {
                 byte.is_ascii_digit()
                     || matches!(
                         byte,
                         b'T' | b'Z' | b'+' | b'-' | b':' | b'.' | b's' | b'm' | b'h' | b'd'
                     )
             })
-    }) {
-        return None;
-    }
-    params.is_empty().then(|| serde_json::json!({"op": op, "project": project, "service": service, "tail": tail, "since": since}))
+    })
 }
 
 fn read_result(socket: &Path, request: &Value) -> Result<Value, u16> {
@@ -1371,238 +1430,17 @@ fn read_result(socket: &Path, request: &Value) -> Result<Value, u16> {
     }
 }
 
-fn serve_read(stream: &mut TcpStream, target: &str, app: &App) -> Result<(), String> {
-    let request = read_request(target, &app.config);
-    let result = request
-        .ok_or(400)
-        .and_then(|request| read_result(&app.config.read_socket, &request));
-    let (status, body) = match result {
-        Ok(value) => (200, value),
-        Err(400) => (400, serde_json::json!({"error": "Read operation refused"})),
-        Err(503) => (
-            503,
-            serde_json::json!({"error": "Read executor unavailable"}),
-        ),
-        Err(_) => (
-            502,
-            serde_json::json!({"error": "Read operation failed or output limit exceeded"}),
-        ),
-    };
-    let bytes = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
-    write_response(
-        stream,
-        status,
-        "application/json; charset=utf-8",
-        &bytes,
-        "no-store",
-    )
-}
-
-fn serve(app: Arc<App>) -> Result<(), String> {
-    let address = format!("{}:{}", app.config.host, app.config.port);
-    let listener = TcpListener::bind(&address)
-        .map_err(|error| format!("cannot listen on {address}: {error}"))?;
-    println!("Yard Web listening on {address}");
-
-    for connection in listener.incoming() {
-        match connection {
-            Ok(stream) => {
-                let app = Arc::clone(&app);
-                thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, &app) {
-                        eprintln!("yard-web request failed: {error}");
-                    }
-                });
-            }
-            Err(error) => eprintln!("yard-web accept failed: {error}"),
-        }
-    }
-    Ok(())
-}
-
-fn handle_connection(mut stream: TcpStream, app: &App) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| error.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|error| error.to_string())?;
-
-    let mut reader = BufReader::new(stream.try_clone().map_err(|error| error.to_string())?);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|error| error.to_string())?;
-    if request_line.len() > 8_192 {
-        return write_response(
-            &mut stream,
-            414,
-            "text/plain; charset=utf-8",
-            b"URI too long\n",
-            "no-store",
-        );
-    }
-
-    let mut header_bytes = request_line.len();
-    loop {
-        let mut header = String::new();
-        let read = reader
-            .read_line(&mut header)
-            .map_err(|error| error.to_string())?;
-        if read == 0 || header == "\r\n" || header == "\n" {
-            break;
-        }
-        header_bytes += read;
-        if header_bytes > 32_768 {
-            return write_response(
-                &mut stream,
-                431,
-                "text/plain; charset=utf-8",
-                b"Request headers too large\n",
-                "no-store",
-            );
-        }
-    }
-
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts.next().unwrap_or_default();
-    let path = target.split('?').next().unwrap_or("/");
-    if method != "GET" {
-        return write_response(
-            &mut stream,
-            405,
-            "text/plain; charset=utf-8",
-            b"Method not allowed\n",
-            "no-store",
-        );
-    }
-
-    match path {
-        "/api/read" => serve_read(&mut stream, target, app),
-        "/healthz" => write_response(
-            &mut stream,
-            200,
-            "application/json; charset=utf-8",
-            b"{\"status\":\"ok\"}\n",
-            "no-store",
-        ),
-        "/api/status" => {
-            let mut body = serde_json::to_vec(&app.status()).map_err(|error| error.to_string())?;
-            body.push(b'\n');
-            write_response(
-                &mut stream,
-                200,
-                "application/json; charset=utf-8",
-                &body,
-                "no-store",
-            )
-        }
-        "/" => serve_static(&mut stream, &app.config.static_dir, "index.html"),
-        "/index.html" => serve_static(&mut stream, &app.config.static_dir, "index.html"),
-        "/styles.css" => serve_static(&mut stream, &app.config.static_dir, "styles.css"),
-        "/app.js" => serve_static(&mut stream, &app.config.static_dir, "app.js"),
-        "/favicon.svg" => serve_static(&mut stream, &app.config.static_dir, "favicon.svg"),
-        _ => write_response(
-            &mut stream,
-            404,
-            "text/plain; charset=utf-8",
-            b"Not found\n",
-            "no-store",
-        ),
-    }
-}
-
-fn serve_static(stream: &mut TcpStream, directory: &Path, filename: &str) -> Result<(), String> {
-    let path = directory.join(filename);
-    let body = match fs::read(&path) {
-        Ok(body) => body,
-        Err(_) => {
-            return write_response(
-                stream,
-                404,
-                "text/plain; charset=utf-8",
-                b"Not found\n",
-                "no-store",
-            )
-        }
-    };
-    let content_type = match Path::new(filename)
-        .extension()
-        .and_then(|value| value.to_str())
-    {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-    write_response(stream, 200, content_type, &body, "no-cache")
-}
-
-fn write_response(
-    stream: &mut TcpStream,
-    status: u16,
-    content_type: &str,
-    body: &[u8],
-    cache_control: &str,
-) -> Result<(), String> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        414 => "URI Too Long",
-        431 => "Request Header Fields Too Large",
-        _ => "Error",
-    };
-    let headers = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: {cache_control}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\n\r\n",
-        body.len()
-    );
-    stream
-        .write_all(headers.as_bytes())
-        .and_then(|_| stream.write_all(body))
-        .map_err(|error| error.to_string())
-}
-
-fn healthcheck(config: &Config) -> Result<(), String> {
-    let address = format!("127.0.0.1:{}", config.port);
-    let mut stream = TcpStream::connect_timeout(
-        &address
-            .parse()
-            .map_err(|error| format!("invalid address: {error}"))?,
-        Duration::from_secs(2),
-    )
-    .map_err(|error| format!("cannot reach yard-web: {error}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| error.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|error| error.to_string())?;
-    stream
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .map_err(|error| error.to_string())?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| error.to_string())?;
-    if response.starts_with("HTTP/1.1 200 ") {
-        Ok(())
-    } else {
-        Err("yard-web health check returned a non-success response".to_owned())
-    }
-}
-
 fn run() -> Result<(), String> {
     let config = Config::from_env()?;
     if env::args().nth(1).as_deref() == Some("--healthcheck") {
-        return healthcheck(&config);
+        return http::healthcheck(&config);
     }
-    serve(Arc::new(App::new(config)?))
+    // The blocking reqwest client owns its own runtime, so it must be created and
+    // dropped outside of the async runtime.
+    let app = Arc::new(App::new(config)?);
+    http::serve(Arc::clone(&app))?;
+    drop(app);
+    Ok(())
 }
 
 fn main() {
@@ -1615,6 +1453,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
 
     const VALID_HOST: &str = r#"{"version":1,"collected_at_unix":1000,"thresholds":{"disk_warn_percent":80,"disk_crit_percent":90,"mem_pressure_percent":85},"cpu":{"value":40.0,"status":"normal","message":null},"load":{"value":[1,2,3],"status":"normal","message":null},"memory":{"value":{"used_bytes":50,"total_bytes":100},"status":"warning","message":null},"disks":[],"docker":{"value":null,"status":"unknown","message":"Docker unavailable"},"containers":[],"containers_status":"unknown","containers_message":null,"secret":"DO_NOT_EXPOSE"}"#;
 
@@ -1847,6 +1687,8 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: socket,
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .unwrap();
         let mut payload = StatusPayload {
@@ -2206,6 +2048,8 @@ mod tests {
             cache_duration: Duration::from_secs(60),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         };
         let app = App::new(config).unwrap();
         assert_eq!(app.status().host.status, "unknown");
@@ -2318,21 +2162,15 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            handle_connection(stream, &app).unwrap();
-        });
-        let mut client = TcpStream::connect(address).unwrap();
-        client
-            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
-        server.join().unwrap();
+        let app = Arc::new(app);
+        let response = http::exchange(
+            &app,
+            "GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
 
         let (headers, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(headers.starts_with("HTTP/1.1 200 OK"), "{headers}");
@@ -2375,7 +2213,10 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
+        .map(Arc::new)
         .unwrap();
         for path in [
             "/api/read?op=deploy&project=demo",
@@ -2452,7 +2293,10 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: socket.clone(),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
+        .map(Arc::new)
         .unwrap();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -2472,22 +2316,142 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    fn read_api_http(app: &App, path: &str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        thread::scope(|scope| {
-            let server = scope.spawn(|| {
-                let (stream, _) = listener.accept().unwrap();
-                handle_connection(stream, app).unwrap();
-            });
-            let mut client = TcpStream::connect(address).unwrap();
-            client
-                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
-                .unwrap();
-            let mut response = String::new();
-            client.read_to_string(&mut response).unwrap();
-            server.join().unwrap();
-            response
-        })
+    #[test]
+    fn http_surface_keeps_fixed_routes_methods_and_security_headers() {
+        let dir = temp_dir("http-surface");
+        fs::write(dir.join("index.html"), "<h1>ok</h1>").unwrap();
+        fs::write(dir.join("secret.txt"), "private").unwrap();
+        let app = Arc::new(
+            App::new(Config {
+                host: "127.0.0.1".into(),
+                port: 0,
+                projects_dir: dir.clone(),
+                state_dir: dir.clone(),
+                static_dir: dir.clone(),
+                check_timeout: Duration::from_secs(1),
+                cache_duration: Duration::from_secs(1),
+                host_max_age_seconds: 300,
+                read_socket: dir.join("missing.sock"),
+                ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+                proxy_token: None,
+            })
+            .unwrap(),
+        );
+        let health = read_api_http(&app, "/healthz");
+        assert!(health.starts_with("HTTP/1.1 200"), "{health}");
+        assert!(health.ends_with("{\"status\":\"ok\"}\n"));
+        let lower = health.to_ascii_lowercase();
+        assert!(lower.contains("cache-control: no-store"));
+        assert!(lower.contains("x-content-type-options: nosniff"));
+        assert!(lower.contains("content-security-policy: default-src 'self'"));
+
+        let index = read_api_http(&app, "/");
+        assert!(index.starts_with("HTTP/1.1 200") && index.contains("<h1>ok</h1>"));
+        assert!(index
+            .to_ascii_lowercase()
+            .contains("cache-control: no-cache"));
+        // Only index.html, favicon.svg and /assets/<name> are served from the directory.
+        for path in [
+            "/secret.txt",
+            "/app.js",
+            "/../secret.txt",
+            "/%2e%2e/secret.txt",
+            "/static/../secret.txt",
+        ] {
+            assert!(
+                read_api_http(&app, path).starts_with("HTTP/1.1 404"),
+                "{path}"
+            );
+        }
+        for path in ["/healthz", "/api/status", "/api/read?op=images", "/nope"] {
+            let response = http::exchange(
+                &app,
+                &format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(response.starts_with("HTTP/1.1 405"), "{path}: {response}");
+            assert!(response.ends_with("Method not allowed\n"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn serves_react_build_with_asset_caching_and_spa_fallback() {
+        let dir = temp_dir("spa");
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        fs::write(dir.join("index.html"), "<div id=root></div>").unwrap();
+        fs::write(dir.join("favicon.svg"), "<svg/>").unwrap();
+        fs::write(dir.join("assets/index-abc123.js"), "console.log(1)").unwrap();
+        fs::write(dir.join("assets/plex-abc.woff2"), "font").unwrap();
+        fs::write(dir.join("secret.txt"), "private").unwrap();
+        let app = Arc::new(
+            App::new(Config {
+                host: "127.0.0.1".into(),
+                port: 0,
+                projects_dir: dir.clone(),
+                state_dir: dir.clone(),
+                static_dir: dir.clone(),
+                check_timeout: Duration::from_secs(1),
+                cache_duration: Duration::from_secs(1),
+                host_max_age_seconds: 300,
+                read_socket: dir.join("missing.sock"),
+                ops_socket: dir.join("missing-ops.sock"),
+                proxy_token: None,
+            })
+            .unwrap(),
+        );
+        let asset = read_api_http(&app, "/assets/index-abc123.js").to_ascii_lowercase();
+        assert!(asset.starts_with("http/1.1 200"), "{asset}");
+        assert!(asset.contains("cache-control: public, max-age=31536000, immutable"));
+        assert!(asset.contains("content-type: text/javascript"));
+        assert!(asset.contains("content-security-policy: default-src 'self'"));
+        assert!(read_api_http(&app, "/assets/plex-abc.woff2")
+            .to_ascii_lowercase()
+            .contains("content-type: font/woff2"));
+        assert!(read_api_http(&app, "/favicon.svg").contains("<svg/>"));
+
+        // Client-side routes get index.html without caching; deep links included.
+        for path in [
+            "/",
+            "/projects/hello-api/logs",
+            "/activity/0198",
+            "/images",
+            "/host?x=1",
+        ] {
+            let response = read_api_http(&app, path);
+            assert!(response.starts_with("HTTP/1.1 200"), "{path}: {response}");
+            assert!(response.contains("<div id=root></div>"), "{path}");
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains("cache-control: no-cache"),
+                "{path}"
+            );
+        }
+        // API paths, missing assets, files and traversal never fall back to index.html.
+        for path in [
+            "/api",
+            "/api/nope",
+            "/api/jobs-missing/x",
+            "/assets/missing.js",
+            "/assets/",
+            "/assets/..%2fsecret.txt",
+            "/assets/%2e%2e%2fsecret.txt",
+            "/assets/.hidden",
+            "/assets/a/b.js",
+            "/secret.txt",
+            "/%2e%2e/secret.txt",
+        ] {
+            let response = read_api_http(&app, path);
+            assert!(response.starts_with("HTTP/1.1 404"), "{path}: {response}");
+            assert!(!response.contains("private") && !response.contains("<div id=root>"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn read_api_http(app: &Arc<App>, path: &str) -> String {
+        http::exchange(
+            app,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        )
     }
 }

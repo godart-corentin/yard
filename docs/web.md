@@ -1,7 +1,36 @@
-# Yard Web status and read-only operations
+# Yard Web
 
-Yard Web is an optional private status page for the projects already configured in Yard.
-It does not introduce a second project inventory: `/etc/yard/projects/*.toml` remains the source of truth.
+Yard Web is an optional private web interface for the projects already configured in Yard.
+It shows their status and runs the same actions as the CLI. It does not introduce a second
+project inventory: `/etc/yard/projects/*.toml` remains the source of truth.
+
+The wire contract (endpoints, job model, executor protocol) is in [web-jobs.md](web-jobs.md).
+This page explains what Web can do, how it is built and what it means for security.
+
+## What Web can do
+
+Reads (no side effect):
+
+- project health, deployed release, host metrics and service probes (`/api/status`);
+- bounded one-shot application logs, recorded restore points, the restore journal and the image
+  inventory, plus the dry run of an image prune (`/api/read`);
+- live application logs, streamed (`/api/logs/stream`);
+- the history and live output of jobs (`/api/jobs`).
+
+Actions, run as **jobs** on the host by the Yard CLI (`POST /api/jobs`):
+
+| Web action | Equivalent CLI command |
+| --- | --- |
+| `deploy` | `yard deploy <project>` |
+| `backup` | `yard backup <project>` |
+| `restore` (a recorded restore point, explicit confirmation) | `yard restore <project> <revision> --yes` |
+| `images-prune` (explicit confirmation, always all eligible candidates) | `yard images --prune --yes` |
+| `host-collect` | `yard host` |
+
+There is one running job per project; image prune and host collection exclude every other job.
+Each job records who started it (the Basic Auth user), its state, its exit code and its full output.
+Jobs cannot be cancelled in this version. Everything an authenticated user can see, they can also
+act on: there are no roles.
 
 For every project, Yard Web reads:
 
@@ -59,14 +88,47 @@ The Web reader recomputes heartbeat age on every API request from its timestamp.
 Once the host snapshot exceeds `YARD_WEB_HOST_MAX_AGE_SECONDS`, probes become
 Unknown until the CLI collects again. A previously saved version-1 snapshot
 without a `services` field remains readable.
-The CLI (`yard status <project>` or `yard host`) collects CPU, load, RAM, physical disks, Docker usage and Yard container states on the host and writes an atomic, versioned snapshot. Web only reads this file through its existing read-only state mount: it has no Docker socket, host disk mounts, or host-monitoring permissions. Schedule `yard host` externally if continuous refresh is wanted; Yard installs no timer.
+The CLI (`yard status <project>` or `yard host`) collects CPU, load, RAM, physical disks, Docker usage and Yard container states on the host and writes an atomic, versioned snapshot. Web reads this file through its read-only state mount: it has no Docker socket, host disk mounts, or host-monitoring permissions. Schedule `yard host` externally if continuous refresh is wanted; Yard installs no timer.
+
+## Architecture
+
+```text
+browser
+  | HTTPS + Basic Auth
+Caddy        checks the password, then overwrites X-Yard-User and X-Yard-Proxy-Token
+  | private Docker network, no published port
+yard-web     read-only mounts, no Docker socket, unprivileged, read-only root filesystem
+  |-- reads  /etc/yard/projects, /var/lib/yard (including jobs/)   (read-only bind mounts)
+  |-- reads  /run/yard-web-read/read.sock  --> yard-web-read.service (yard read-server)
+  `-- writes /run/yard-web-ops/ops.sock    --> yard-web-ops.service  (yard ops-server)
+```
+
+- **Caddy** is the only authentication. It is also the trusted proxy: it tells Web who the user is.
+- **yard-web** (Rust, axum) serves the React build, the status and read APIs, the jobs API and the
+  Server-Sent Events streams. It never runs a command itself.
+- **Read executor** (`yard-web-read.service`): bounded, allowlisted reads (`images`, `images-prune-plan`,
+  `logs`, `logs-follow`, `restore-points`, `restore-log`). Sandboxed (read-only filesystem, no
+  capabilities, private network), runs as root only to read mode-0600 state and reach Docker.
+- **Ops executor** (`yard-web-ops.service`, `yard ops-server`): starts the five job actions above. It
+  accepts a closed set of actions and builds each command line from a fixed template, so the request
+  cannot choose a command or free-form arguments. See "Security" for its privileges.
+- **Job storage**: the ops executor writes `/var/lib/yard/jobs/<id>.json` (state, atomically replaced)
+  and `<id>.log` (append-only output, capped at 16 MiB), removes terminal jobs after 90 days and keeps the
+  history under a cap (500 jobs and 512 MiB by default, oldest finished jobs first). Web reads these files
+  through the state mount it already has, so job history and output stay readable while the executor is
+  down. Web never writes there.
+
+Each executor socket is a separate directory with its own group (`yard-web-read`, `yard-web-ops`);
+the Web container user joins both groups, and nothing else on the host does by default.
 
 ## Install
 
-Yard Web follows the same deployment model as Kilnr Web: a dedicated Docker container behind the existing Caddy reverse proxy.
-The application server is a standalone Rust binary and no host port is published.
+Yard Web is a dedicated Docker container behind the existing Caddy reverse proxy. The application
+server is a standalone Rust binary and no host port is published.
 
-Install or update Yard first. The main installer copies the reproducible Yard Web build context to `/usr/local/share/yard/web-src`, so the web deployment does not depend on keeping a source checkout:
+Install or update Yard first. The main installer copies the reproducible Yard Web build context to
+`/usr/local/share/yard/web-src` and the ops executor files to `/usr/local/share/yard/ops-src`, so the
+web deployment does not depend on keeping a source checkout:
 
 ```bash
 ./install.sh
@@ -82,101 +144,66 @@ The installer:
 
 1. discovers the running Caddy container and its mounted Caddyfile;
 2. reuses Caddy's existing Compose default network when possible;
-3. asks for a Basic Auth password (username defaults to `yard`);
-4. stores only Caddy's password hash in the Caddyfile;
-5. mounts `/etc/yard/projects` and `/var/lib/yard` read-only into `yard-web`;
-6. builds the Rust `yard-web` binary from the installed web source;
-7. starts the `yard-web` container as an unprivileged user;
-8. validates and reloads Caddy.
+3. asks for a Basic Auth password (username from `YARD_WEB_USER` or a prompt);
+4. creates, once, a random proxy token in `/opt/yard/web.env` (root, mode 0600) and reuses it on
+   re-installs and updates; the token is never printed;
+5. writes the Yard block in the Caddyfile: Basic Auth (password hash only) and, in `reverse_proxy`,
+   `header_up X-Yard-User {http.auth.user.id}` and `header_up X-Yard-Proxy-Token <token>`. The two
+   server-sent-event routes (`/api/logs/stream`, `/api/jobs/*/output`) get their own `handle @stream` with
+   `flush_interval -1` and no `encode`, so events are neither compressed nor buffered; every other route is
+   served by a `handle` that applies `encode zstd gzip`;
+6. installs and starts `yard-web-read.service` and `yard-web-ops.service`, and waits for their sockets;
+7. mounts `/etc/yard/projects`, `/var/lib/yard` and both socket directories **read-only** into `yard-web`;
+8. builds the React frontend (Node) and the Rust server in a multi-stage Docker build and starts the
+   container as an unprivileged user (65532) with `YARD_WEB_PROXY_TOKEN` taken from `web.env`;
+9. validates and reloads Caddy.
 
-Override the username with:
+Override the username with `sudo YARD_WEB_USER=corentin ./install-web.sh status.example.com`. If the
+Caddy network is ambiguous, choose one with `YARD_PROXY_NETWORK=caddy-proxy`.
 
-```bash
-sudo YARD_WEB_USER=corentin ./install-web.sh status.example.com
-```
-
-If automatic Caddy network discovery is ambiguous, choose an existing network already attached to Caddy:
-
-```bash
-sudo YARD_PROXY_NETWORK=caddy-proxy ./install-web.sh status.example.com
-```
-
-The generated Compose project lives at:
+Files created:
 
 ```text
-/opt/yard/docker-compose.yml
+/opt/yard/docker-compose.yml          Compose project (contains no secret)
+/opt/yard/web.env                     root:root 0600, YARD_WEB_PROXY_TOKEN
+/opt/yard/backups/<timestamp>/        previous Caddyfile (holds the token and password hash) and Compose file, root only
+/etc/systemd/system/yard-web-read.service
+/etc/systemd/system/yard-web-ops.service
 ```
 
-Caddy configuration and previous Yard Web Compose files are backed up under:
+Re-running `install-web.sh` after an upgrade is how unit changes are applied; `update.sh` only
+restarts the units.
 
-```text
-/opt/yard/backups/
-```
+### Proxy identity
 
-## Status API
+Yard Web serves every `/api/*` route (status, reads, job list and output, the SSE log stream and mutations)
+only when the request carries the proxy token; `/healthz` and the static UI files stay open. Caddy adds it, and the user
+name, to every proxied request. `header_up <name> <value>` **replaces** any value the client sent for
+that header (it only appends with a `+` prefix, which the installer does not use), so a browser cannot
+choose its own identity or supply the token. Web compares the token in constant time, validates the user
+name as `[A-Za-z0-9._@-]{1,64}`, and never echoes either value. A missing or wrong token on `/api/*` is
+`403 forbidden`. With no `YARD_WEB_PROXY_TOKEN` configured (for example a plain `docker run`), the gate is off so
+the read-only dashboard keeps working (`GET /api/*` answers), while every mutation is still refused with `403`.
 
-The container exposes the following endpoints only to its Docker network:
-
-```text
-GET /healthz
-GET /api/status
-GET /api/read?op=images
-GET /api/read?op=logs&project=hello-api&service=api&tail=200&since=2h
-GET /api/read?op=restore-points&project=hello-api
-GET /api/read?op=restore-log&project=hello-api
-```
-
-`/api/status` reports the overall state and, per project:
-
-- current health (`Operational`, `Down`, or `Unknown`);
-- health URL;
-- HTTP status when available;
-- request latency;
-- `services`: sanitized CLI measurements by Compose service (health state,
-  HTTP latency in milliseconds or current heartbeat age in seconds). Project
-  state derives from these service measurements when service probes are
-  configured; the legacy `deployment.health_url` behavior remains for old
-  manifests. Without a fresh snapshot, service measurements are Unknown;
-- current Yard release tag/revision, deployment timestamp, and `release.services` (each service name and image reference, useful for checking exactly which image is deployed);
-- `pending_release` when activation is interrupted or a rollback cannot be verified (including its status and per-service images), so the dashboard can warn that the recorded release and Docker state may differ.
-
-The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` (version 1) with the host metrics, applied thresholds, and statuses computed by the CLI. Web does not recompute warnings. A configured project with no Compose containers yet has `containers_status: "unknown"` and the message "No containers for a configured project"; only a stopped container is `Critical`. The host view becomes `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300 seconds; stale age is still shown. Override with `YARD_WEB_HOST_MAX_AGE_SECONDS`. The rest of `/api/status` continues to work. Project name `host` is reserved for the snapshot filename.
-
-The dashboard's **Host** section shows only CPU, RAM, physical disks and the measurement age. Its badge reflects the most severe CPU/RAM/disk status (or `Unknown` if the snapshot is unavailable); stopped containers, load and Docker usage do not affect it. The **Services** section lists each container beneath its matching project card, with the Compose service name, state and status. A configured migration service that exited with code 0 appears as `Completed` and does not degrade the project. Other stopped containers degrade their service even when the HTTP check succeeds; a failed HTTP check leaves the service `Down`. The Services badge and summary counts reflect these displayed service states. Without a fresh host snapshot, container states cannot be shown and project badges reflect HTTP health alone. The CLI still displays Load, Docker usage and containers, and `/api/status` still exposes all of them in the snapshot; they are simply not displayed in Host.
-
-The browser refreshes the status automatically every 30 seconds. Health responses are cached briefly by the server to avoid duplicate checks. Changing a page or project tab (including browser back/forward and direct links) starts at the top of the new view; filters, one-shot read controls, manual refresh and the 30-second status refresh preserve the current scroll position. Navigation jumps instantly, without animation.
-
-The Services cards open a project overview and read-only tabs for Logs, Restore points and Restore log. The global Images view displays `yard images` inventory as reported by the host; these views show the actual bounded CLI output or an explicit unavailable state. HTTP 400 means the read was refused, 503 means the read executor could not answer, and 502 combines command failure, timeout, output limit and invalid executor replies: the browser cannot determine which occurred. Transport and invalid response errors are also unavailable, never empty inventories. The UI displays only the server's known generic error messages, not arbitrary backend text. Logs are one-shot (`--no-follow`) and limited to 1000 requested lines, 128 KiB returned and 10 seconds execution; `since` is restricted to short Docker duration/timestamp characters. An unknown service is refused against the project's configured Compose services. URL-only monitors have HTTP status but no CLI read or deployment actions. Image inventory failure blocks display rather than presenting a guessed reclaimable list. No buttons for deploy, backup, restore, prune or host collection are enabled. `yard images --prune --yes` (CLI-only) removes all eligible candidates, not a selection.
-
-The host-side `yard-web-read.service` is installed by `install-web.sh` after the updated CLI is installed. The installer creates a dedicated system group `yard-web-read` if absent and passes its host GID as an additional group to the Web container (which remains UID:GID 65532:65532). It waits up to 10 seconds for `/run/yard-web-read/read.sock` (mode 0660, dedicated group inside a mode 0750 directory), reporting a failed service or timeout before changing the live Caddyfile. Web mounts that directory read-only; it never mounts Docker's socket. The host executor accepts only `images`, `logs`, `restore-points`, `restore-log` with exact bounded parameters, checks the project against the TOML inventory and refuses URL monitors. It spawns its own installed Yard binary with fixed subcommands and no shell, truncates/rejects excessive output and kills the command process group on timeout. Both sides reject extra fields and unsafe values, and Web sanitizes host errors. The systemd service uses a read-only filesystem, no capabilities, no new privileges and a private network; it nevertheless runs as root to read mode-0600 Yard state and Compose `.env` and access the Docker socket. Review this operational privilege before deployment and keep Basic Auth and the host protected. No new public port is opened.
+The token protects against **other containers on the shared Caddy network** talking to `yard-web:8088`
+directly. Be aware where it lives: in clear in the Caddyfile (and so in Caddy's loaded configuration, which
+the Caddy admin API serves; it listens on localhost inside the Caddy container by default, do not publish
+or expose it), in `/opt/yard/web.env`, and in the environment of the `yard-web` container, which anyone able
+to run `docker inspect` can read. Keep the Caddyfile unreadable by other users (`chmod o-rw`; the installer warns
+when it is not). To rotate: delete `/opt/yard/web.env` and run `install-web.sh` again.
 
 ## Update
 
-Update the Yard CLI, installed web source and any running web container together:
+Update the Yard CLI, the installed web source and any running web container together:
 
 ```bash
 ./update.sh
 ```
 
-If `yard-web` is running, the updater rebuilds its image from the newly installed Rust server and frontend source.
-
-## Security
-
-Basic Auth is enforced by Caddy, not by the application container.
-
-`yard-web`:
-
-- runs a native Rust HTTP server with no Python application runtime;
-- publishes no host port;
-- mounts Yard configuration and state read-only;
-- runs with a read-only root filesystem;
-- drops Linux capabilities;
-- enables `no-new-privileges`;
-- has conservative process, memory, and CPU limits;
-- never reads application `.env` files or secrets;
-- reads only known public fields from the host snapshot (no arbitrary JSON forwarding).
-
-Only `deployment.health_url`, Yard's deployment metadata and sanitized service/host snapshot fields are exposed to the web UI; application environment files are never read.
+If `yard-web` is running, the updater restarts `yard-web-read.service`, restarts `yard-web-ops.service`
+**unless jobs are running** (it says so; restart it later, a restart ends running jobs and marks them
+failed), and rebuilds the image from the installed Rust server and frontend source. If `/opt/yard/web.env`
+does not exist yet (Web installed before Web actions), it tells you to run `install-web.sh`.
 
 ## Remove
 
@@ -184,4 +211,102 @@ Only `deployment.health_url`, Yard's deployment metadata and sanitized service/h
 sudo ./uninstall-web.sh
 ```
 
-This removes the Yard Caddy block and the `yard-web` Compose project. It does not modify `/etc/yard/projects` or `/var/lib/yard`.
+This removes the Yard Caddy block, the `yard-web` Compose project, `/opt/yard/web.env` and both
+executor units. It does not modify `/etc/yard/projects` or `/var/lib/yard` (job history and logs stay).
+
+## HTTP API
+
+The container exposes these endpoints only to its Docker network (see [web-jobs.md](web-jobs.md)):
+
+```text
+GET  /healthz
+GET  /api/status
+GET  /api/read?op=images | images-prune-plan | logs | restore-points | restore-log
+GET  /api/logs/stream?project=hello-api&service=api&tail=200     (SSE)
+GET  /api/jobs                       GET /api/jobs/{id}           GET /api/jobs/{id}/output   (SSE)
+POST /api/jobs                       {action, project?, revision?, confirm?}
+```
+
+`/api/status` reports the overall state and, per project:
+
+- current health (`Operational`, `Down`, or `Unknown`), health URL, HTTP status and request latency;
+- `services`: sanitized CLI measurements by Compose service (health state, HTTP latency or heartbeat age);
+  without a fresh snapshot they are Unknown;
+- the current Yard release (tag, revision, deployment time, per-service images) and `pending_release`
+  when activation was interrupted or a rollback could not be verified;
+- backup status (local and off-site attempts).
+
+The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` with host metrics, applied
+thresholds and the statuses computed by the CLI. Web does not recompute warnings. The host view becomes
+`Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300
+seconds (`YARD_WEB_HOST_MAX_AGE_SECONDS`). A configured project with no Compose containers yet is
+`Unknown`; only a stopped container is `Critical`. The project name `host` is reserved, and a name starting with `-` is refused everywhere (CLI, Web, executors; `yard list` skips such a manifest).
+
+Reads show the actual bounded CLI output or an explicit unavailable state. `400` means refused, `503`
+the executor could not answer, `502` a command failure, timeout, output limit or invalid reply. The UI
+shows only Web's generic error messages, never backend text. One-shot logs are limited to 1000 lines,
+128 KiB and 10 seconds; `since` only accepts short Docker duration/timestamp characters, and an unknown
+service is refused against the project's configured Compose services. URL-only monitors have an HTTP
+status but no reads and no actions.
+
+Job requests are refused (`400`) for an unknown project, a URL monitor, a missing or unrecorded restore
+point, or a missing `confirm: true` on `restore` and `images-prune`; a busy lock is `409` with the running
+job id; an unreachable executor is `503`. The browser refreshes status automatically every 30 seconds.
+
+## Security
+
+What did **not** change: Basic Auth is enforced by Caddy, not by the application container, and the
+`yard-web` container itself is still unprivileged and read-only: no published port, read-only
+Yard mounts, read-only root filesystem, all capabilities dropped, `no-new-privileges`, process, memory and
+CPU limits, no Docker socket, no application `.env` files. Only known public fields of the project
+state and host snapshot are exposed.
+
+What changed: Web can now start deployments, backups, restores and image prunes. Compromising a Basic Auth
+account, or the Caddy host, now means **running those actions as root on the host**, where before it meant
+reading status. Concretely:
+
+- **Authorization is Basic Auth alone, with no roles.** Every authenticated user may run every action, on every
+  project. Give the password only to people you would give `sudo yard` to. There is no rate limit besides
+  the per-project and global job locks.
+- **The ops executor is root and its hardening is relaxed** compared with the reader, because deploys cannot
+  work without it. It runs as root (Docker socket, Git, project backup commands, writes `/var/lib/yard`),
+  keeps network access (Git fetches, image builds, off-site backups), uses `ProtectSystem=full` instead of
+  `strict` with no `ProtectHome` (repositories, Compose directories and backup targets are wherever the
+  manifests say), and keeps four capabilities (`CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`,
+  `CAP_CHOWN`). `NoNewPrivileges`, namespace, syscall-architecture and kernel-protection restrictions remain.
+  Project manifests are privileged configuration (they name the commands that run): keep
+  `/etc/yard/projects` writable by trusted administrators only, since Web will run what they say.
+- **What a request can choose is small.** The action (closed list), a project that exists in
+  `/etc/yard/projects` with a full manifest, and for restore a revision that is a recorded restore point.
+  Commands are built from fixed templates, with no shell and a cleared environment (`PATH`, `HOME`, the
+  `YARD_*` settings). Web validates everything, then the executor validates it again. Requests are limited
+  to 4 KiB and unknown fields are rejected.
+- **Cross-site requests are blocked.** A mutation needs the `X-Yard-Request: 1` header (a browser cannot add it
+  cross-origin without a CORS preflight, and Web sends no CORS headers), `Sec-Fetch-Site` must be
+  `same-origin` when present, and `Origin` must match the host. Browsers send Basic Auth credentials automatically,
+  which is why these checks matter.
+- **The proxy token** (see above) stops containers on the Caddy network from forging an identity or bypassing
+  the Basic Auth. Every `/api/*` route, GET and SSE included, requires it, so such a container cannot read
+  status, logs or job output either. Only `/healthz` and the static UI are open. Without a configured token
+  reads are open (read-only mode) and mutations are refused.
+- **Sockets**: the ops socket is mode 0660 in a 0750 directory owned by the dedicated `yard-web-ops` group. Only
+  members of that group (the Web container) can start jobs. Anyone who can join that group, or compromise the
+  `yard-web` process, can ask the executor for the same five actions, and nothing else.
+- **Bounded jobs.** Each runs in its own process group with a wall-clock timeout (deploy and restore 30 min,
+  backup 60 min, prune 10 min, host collection 2 min): SIGTERM, then SIGKILL after 10 s; the group is killed
+  when the job ends. Output is capped at 16 MiB. At most 32 job output streams and 4 live log streams are open
+  at once (1 or 2 hours each). Stopping the executor ends running jobs.
+- **Job output is visible and stored in clear.** `deploy`, `backup` and `restore` print whatever the CLI and the
+  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 2750 with files 0640, so that the read-only
+  state mount works through the container's `yard-web-ops` supplementary group (`group_add` in the Compose file)
+  and other local users cannot read it. Every authenticated user, the `yard-web` container, root and members of
+  `yard-web-ops` can read it, for 90 days at most. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
+  redact output.
+
+## Hardening checklist
+
+- Serve Yard Web only over HTTPS with a strong Basic Auth password, ideally on a private network or VPN.
+- Keep `/opt/yard` and the Caddyfile root-readable only; do not expose the Caddy admin endpoint.
+- Do not put untrusted containers on the Caddy network.
+- Keep manifests (`/etc/yard/projects`) writable by administrators only.
+- Review `journalctl -u yard-web-ops.service`; every job also records its actor in `/var/lib/yard/jobs/`.

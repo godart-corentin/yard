@@ -18,7 +18,7 @@ yard backup hello-api
 
 Yard sits on top of tools you already trust — Git, Docker Compose, HTTP health checks, and existing backup commands — and turns common deployment operations into predictable, repeatable commands.
 
-An optional private **Yard Web** dashboard can expose the current health and deployed release of the projects already configured in Yard. It uses the same project manifests; there is no second status-page configuration to maintain.
+An optional private **Yard Web** interface shows the current health and deployed release of the projects already configured in Yard, and can run the same deploy, backup, restore and prune actions as jobs. It uses the same project manifests; there is no second status-page configuration to maintain.
 
 ## Why Yard?
 
@@ -214,9 +214,9 @@ yard backup hello-api
 
 `yard status` (without a project) prints one summary line per configured project, including recorded releases, deployment and backup timestamps, service probes, checkout disk usage and alerts for stopped/missing containers or application image drift. A configured migration service that exited successfully is expected. Data services are monitored for stopped containers but their images are not compared with application releases. `yard status <project>` keeps its existing Git, release, backup, Compose and host sections and adds detailed probe measurements and timestamps. Disk (repo) counts allocated bytes in the local checkout only: Docker volumes, backup files outside the checkout and remote copies are not attributed to a project. An unreadable state is reported as an alert, never as a missing deployment.
 
-Image cleanup is CLI-only and never scheduled. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
+Image cleanup is never scheduled; it is run from the CLI or, after a dry run, from Yard Web. It protects images recorded for the current and previous release of every configured project, and skips images used by running containers. Only 12-character Git-revision tags in repositories recorded by those releases are candidates; unrelated Docker images are never selected. The byte estimate is the sum of image sizes (shared layers can reduce actual savings). A project with missing or invalid release state, an interrupted deployment, or a failed Docker inspection blocks the entire prune rather than guessing what is safe. Legacy releases without recorded service images require a new deployment before pruning is available.
 
-`logs` follows by default (`--follow` is explicit; `--no-follow` exits after printing). Without `--service`, it includes all services configured for the project. `--service` must exactly match a configured Compose service; an unknown name reports the valid services. `--since` accepts a duration or timestamp understood by Docker Compose and is passed through unchanged.
+`deploy`, `backup`, `restore ... --yes`, `images --prune --yes` and `host` can also be started from [Yard Web](#yard-web) as jobs; the other commands are CLI-only or have a read-only Web counterpart. `logs` follows by default (`--follow` is explicit; `--no-follow` exits after printing). Without `--service`, it includes all services configured for the project. `--service` must exactly match a configured Compose service; an unknown name reports the valid services. `--since` accepts a duration or timestamp understood by Docker Compose and is passed through unchanged.
 
 For development and tests, the system directories can be overridden:
 
@@ -246,19 +246,19 @@ Each CLI collection atomically replaces `host.json` in the state directory (`--s
 
 ## Yard Web
 
-Yard Web is an optional private dashboard for the projects already registered in Yard. Its project views now provide bounded, one-shot application logs (`service`, `tail` up to 1000, `since`), recorded restore points, the restore attempt journal, and the global image inventory. These are **read-only**: following logs, deploy, backup, restore, prune, and host collection remain CLI-only. `yard images --prune --yes` always prunes all eligible candidates, never a selected subset.
+Yard Web is an optional private web interface for the projects already registered in Yard. It shows health, the deployed release, host metrics, one-shot and live application logs, restore points, the restore journal and the image inventory, and it **runs the CLI actions as jobs**: `yard deploy`, `yard backup`, `yard restore <project> <revision> --yes`, `yard images --prune --yes` (always all eligible candidates, never a selection, after a dry run) and `yard host`. Every job records who started it, its state, exit code and full output, with one running job per project and live output in the browser. Jobs cannot be cancelled in this version.
+
+Authentication is unchanged (Caddy Basic Auth) and there are no roles: **every authenticated user can run every action**, as root on the host through a dedicated executor. Read [`docs/web.md`](docs/web.md) before exposing it.
 
 It reads:
 
 - the project inventory from `/etc/yard/projects/*.toml`;
 - `deployment.health_url` for the current HTTP health check;
-- `/var/lib/yard/<project>.json` for the deployed release metadata.
-- `/var/lib/yard/host.json` for the last CLI-produced host snapshot, when available.
+- `/var/lib/yard/<project>.json` for the deployed release metadata;
+- `/var/lib/yard/host.json` for the last CLI-produced host snapshot, when available;
+- `/var/lib/yard/jobs/` for the job history and output written by the ops executor.
 
-A project without `deployment.health_url` still appears, but its health is reported as `Unknown`.
-
-The dashboard shows projects as a responsive card grid with current health, latency, HTTP status, last check, and deployed release information when available.
-It also displays host metrics and their precomputed states with the measurement age. After five minutes without a new snapshot, or if the file is unreadable or incompatible, host data is explicitly unavailable while project health remains functional. Set `YARD_WEB_HOST_MAX_AGE_SECONDS` to override the five-minute freshness limit.
+A project without `deployment.health_url` still appears, but its health is reported as `Unknown`. After five minutes without a new snapshot (`YARD_WEB_HOST_MAX_AGE_SECONDS`), or if the file is unreadable or incompatible, host data is explicitly unavailable while project health remains functional.
 
 ### Install Yard Web
 
@@ -276,12 +276,18 @@ The installer:
 2. reuses an existing Docker network already attached to Caddy;
 3. asks for a Basic Auth username and password;
 4. stores only Caddy's password hash in the Caddyfile;
-5. mounts Yard project manifests and deployment state read-only;
-6. builds and starts the `yard-web` container without publishing a host port;
-7. validates and reloads Caddy;
-8. waits for `yard-web` to become healthy.
+5. generates, once, a random proxy token (`/opt/yard/web.env`, root only, never printed) and has Caddy send it with the authenticated user name (`X-Yard-User`, `X-Yard-Proxy-Token`, overwriting anything the client sent), so Web knows who starts a job;
+6. mounts Yard project manifests and deployment state read-only;
+7. builds and starts the `yard-web` container without publishing a host port;
+8. validates and reloads Caddy;
+9. waits for `yard-web` to become healthy.
 
-The installer also requires systemd and the updated Yard CLI. It starts a sandboxed host-side `yard-web-read.service` on a group-restricted Unix socket under `/run/yard-web-read`. The host process needs access to Docker and Yard's private state to perform these reads; the Web container receives only a read-only bind of the socket directory and retains its read-only manifest/state mounts, without Docker socket access. This service runs with host privileges to read existing mode-0600 state and Compose environment files; treat the Web Basic Auth credentials and host executor as sensitive operational access. The Web endpoint and the executor both independently reject all commands outside their read allowlists.
+The installer also requires systemd and the updated Yard CLI. It starts two host-side services, each on a group-restricted Unix socket that the Web container only gets as a bind of the socket directory (the container still has no Docker socket):
+
+- `yard-web-read.service` (`yard read-server`): sandboxed, allowlisted, bounded reads (logs, restore points, image inventory). It runs as root only to read mode-0600 state and Compose environment files.
+- `yard-web-ops.service` (`yard ops-server`): starts the job actions. It runs as root with **relaxed** hardening (network access, `ProtectSystem=full`, a few capabilities) because deployments, backups and restores cannot work without it. Web and the executor both reject everything outside the five allowlisted actions, and commands are built from fixed templates with no shell.
+
+Treat the Basic Auth credentials and the host executors as root-level operational access, and keep `/etc/yard/projects` writable by trusted administrators only.
 
 If Caddy network discovery is ambiguous, choose one explicitly:
 
@@ -304,17 +310,17 @@ Caddy and previous Yard Web configuration are backed up under:
 Yard Web exposes these endpoints inside its Docker network:
 
 ```text
-GET /healthz
-GET /api/status
-GET /api/read?op=images
-GET /api/read?op=logs&project=hello-api&service=api&tail=200&since=2h
-GET /api/read?op=restore-points&project=hello-api
-GET /api/read?op=restore-log&project=hello-api
+GET  /healthz
+GET  /api/status
+GET  /api/read?op=images | images-prune-plan | logs | restore-points | restore-log
+GET  /api/logs/stream?project=hello-api                 (live logs, SSE)
+GET  /api/jobs, /api/jobs/{id}, /api/jobs/{id}/output   (history, live output via SSE)
+POST /api/jobs   {"action":"deploy","project":"hello-api"}
 ```
 
-The browser refreshes automatically, while the server briefly caches health results to avoid duplicate checks.
+`POST` requires the proxy identity headers and a same-origin browser request; without `YARD_WEB_PROXY_TOKEN` Web stays read-only. The browser refreshes automatically, while the server briefly caches health results to avoid duplicate checks.
 
-More detail is available in [`docs/web.md`](docs/web.md).
+More detail is available in [`docs/web.md`](docs/web.md) (architecture and security) and [`docs/web-jobs.md`](docs/web-jobs.md) (API contract).
 
 ## Deployment model
 
@@ -398,7 +404,7 @@ Recommended practices:
 
 Yard executes configured backup commands directly, without a shell. This avoids shell expansion in manifest values, but project manifests are still privileged operational configuration and should only be writable by trusted administrators.
 
-Yard Web is designed to remain private behind Caddy Basic Auth. Its container runs unprivileged, publishes no host port, mounts Yard configuration and state read-only, uses a read-only root filesystem, drops Linux capabilities, and does not read application `.env` files.
+Yard Web is designed to remain private behind Caddy Basic Auth. Its container runs unprivileged, publishes no host port, mounts Yard configuration and state read-only, uses a read-only root filesystem, drops Linux capabilities, and does not read application `.env` files. Actions started from Web run on the host through `yard-web-ops.service`, a root executor with relaxed hardening that only accepts the allowlisted deploy, backup, restore, image prune and host collection actions; any user with the Basic Auth password can start them, and job logs (`/var/lib/yard/jobs/*.log`, mode 0644) hold whatever those commands print. See [`docs/web.md`](docs/web.md#security).
 
 ## Remove Yard Web
 
@@ -406,7 +412,7 @@ Yard Web is designed to remain private behind Caddy Basic Auth. Its container ru
 sudo ./uninstall-web.sh
 ```
 
-This removes the Yard Caddy block and the Yard Web Compose project. It leaves `/etc/yard/projects` and `/var/lib/yard` untouched.
+This removes the Yard Caddy block, the Yard Web Compose project, the proxy token and both executor services. It leaves `/etc/yard/projects` and `/var/lib/yard` (including job history) untouched.
 
 ## Status
 

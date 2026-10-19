@@ -1,0 +1,34 @@
+.row {
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--color-nav-hover);
+}
+
+.name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+
+.name strong {
+  font-weight: 600;
+}
+
+.small {
+  font-size: var(--text-sm);
+}
+
+.latency {
+  font-size: 11.5px;
+}
+
+.failed {
+  color: var(--status-bad-fg);
+}
+
+.actions {
+  white-space: nowrap;
+}
