@@ -35,7 +35,7 @@ jobs:
         run: |
           git diff --exit-code -- web/ui/src/api/types
           test -z "$(git status --porcelain -- web/ui/src/api/types)"
-      - name: Dashboard tests
+      - name: Installer tests
         run: node --test web/tests/*.test.mjs
       - name: Installer syntax
         run: bash -n install.sh install-web.sh uninstall-web.sh update.sh
