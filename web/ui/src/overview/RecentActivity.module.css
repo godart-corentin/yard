@@ -29,3 +29,11 @@
 .meta {
   font-size: var(--text-sm);
 }
+
+.link {
+  text-decoration: none;
+}
+
+.link:hover strong {
+  text-decoration: underline;
+}

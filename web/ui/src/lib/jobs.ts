@@ -17,6 +17,8 @@ const STATE: Record<JobState, { label: string; tone: Tone }> = {
   failed: { label: "Failed", tone: "bad" },
 };
 
+export const jobActionLabel = (job: Job): string => ACTION[job.action] ?? job.action;
+
 export const jobTitle = (job: Job): string =>
   job.project ? `${ACTION[job.action] ?? job.action} ${job.project}` : (ACTION[job.action] ?? job.action);
 

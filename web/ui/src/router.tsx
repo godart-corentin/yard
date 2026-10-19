@@ -6,6 +6,8 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 
+import { ActivityPage } from "./activity/ActivityPage";
+import { JobPage } from "./activity/JobPage";
 import { Placeholder } from "./components/Placeholder";
 import { OverviewPage } from "./overview/OverviewPage";
 import { AppShell } from "./shell/AppShell";
@@ -40,15 +42,15 @@ function projectTab(path: "overview" | "releases" | "logs" | "activity", title: 
 const activityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/activity",
-  component: () => <Placeholder title="Activity" />,
+  component: ActivityPage,
 });
 
 const jobRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/activity/$jobId",
-  component: function JobPage() {
+  component: function JobRoute() {
     const { jobId } = jobRoute.useParams();
-    return <Placeholder title={`Job ${jobId}`} />;
+    return <JobPage jobId={jobId} />;
   },
 });
 

@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 
 import { Icon } from "../components/Icon";
 import { StatusDot } from "../components/StatusDot";
+import { useRunningJobs } from "../api/jobQueries";
 import { useStatus } from "../api/queries";
 import { formatAge } from "../lib/format";
 import { hostLabel, hostTone, projectTone } from "../lib/tone";
@@ -20,6 +21,7 @@ function BrandMark() {
 export function Sidebar() {
   const { data } = useStatus();
   const host = summarizeHost(data?.host);
+  const running = useRunningJobs().data?.jobs.length ?? 0;
 
   return (
     <aside className={styles.side}>
@@ -36,6 +38,7 @@ export function Sidebar() {
         <Link to="/activity" className={styles.nav}>
           <Icon name="activity" />
           Activity
+          {running > 0 && <span className={styles.pill}>{running} running</span>}
         </Link>
         <Link to="/images" className={styles.nav}>
           <Icon name="images" />
