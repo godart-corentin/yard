@@ -66,4 +66,11 @@ if [[ -f /etc/systemd/system/yard-web-read.service ]] \
   systemctl daemon-reload
 fi
 
+if [[ -f /etc/systemd/system/yard-web-ops.service ]] \
+  && grep -Fq '# Yard Web ops executor' /etc/systemd/system/yard-web-ops.service; then
+  systemctl disable --now yard-web-ops.service
+  rm -f /etc/systemd/system/yard-web-ops.service
+  systemctl daemon-reload
+fi
+
 echo "Yard Web removed. Yard CLI configuration and state were left untouched."

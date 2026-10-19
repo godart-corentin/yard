@@ -1,0 +1,48 @@
+# Yard Web ops executor; runs allowlisted Yard CLI actions as jobs for Yard Web.
+#
+# Compared with yard-web-read.service this unit must deploy, back up and restore, so it
+# deliberately relaxes the read profile (everything else is kept):
+#   - PrivateNetwork removed: git fetch, image builds and backup commands use the network.
+#   - ProtectSystem=full instead of strict, ProtectHome removed: repositories, Compose
+#     directories, backup targets and the root user's git/docker credentials live outside
+#     /var/lib/yard, and project manifests choose them. /usr, /boot and /etc stay read-only.
+#   - A small capability set instead of none: a root process without CAP_DAC_OVERRIDE/FOWNER
+#     cannot work in repositories and backup directories owned by the deploy user.
+#   - Docker access comes from running as root (/var/run/docker.sock), as for the CLI itself.
+# NoNewPrivileges stays on, so jobs cannot gain privileges (sudo inside a backup command fails).
+[Unit]
+Description=Yard Web ops executor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=yard-web-ops
+UMask=0007
+RuntimeDirectory=yard-web-ops
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/yard ops-server --socket /run/yard-web-ops/ops.sock
+Restart=on-failure
+RestartSec=2
+# Jobs are children of the executor; stopping it ends them (they are marked failed on restart).
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN
+AmbientCapabilities=
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

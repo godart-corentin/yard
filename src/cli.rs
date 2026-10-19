@@ -25,6 +25,12 @@ pub enum Command {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Run Yard Web actions as jobs over a local Unix socket.
+    #[command(hide = true)]
+    OpsServer {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// List configured projects.
     List,
 
