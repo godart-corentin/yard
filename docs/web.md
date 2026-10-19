@@ -148,7 +148,10 @@ The installer:
 4. creates, once, a random proxy token in `/opt/yard/web.env` (root, mode 0600) and reuses it on
    re-installs and updates; the token is never printed;
 5. writes the Yard block in the Caddyfile: Basic Auth (password hash only) and, in `reverse_proxy`,
-   `header_up X-Yard-User {http.auth.user.id}` and `header_up X-Yard-Proxy-Token <token>`;
+   `header_up X-Yard-User {http.auth.user.id}` and `header_up X-Yard-Proxy-Token <token>`. The two
+   server-sent-event routes (`/api/logs/stream`, `/api/jobs/*/output`) get their own `handle @stream` with
+   `flush_interval -1` and no `encode`, so events are neither compressed nor buffered; every other route is
+   served by a `handle` that applies `encode zstd gzip`;
 6. installs and starts `yard-web-read.service` and `yard-web-ops.service`, and waits for their sockets;
 7. mounts `/etc/yard/projects`, `/var/lib/yard` and both socket directories **read-only** into `yard-web`;
 8. builds the React frontend (Node) and the Rust server in a multi-stage Docker build and starts the

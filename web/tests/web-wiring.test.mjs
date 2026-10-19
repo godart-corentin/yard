@@ -33,7 +33,12 @@ test('Caddy block overwrites identity headers with the Basic Auth user and the p
   const text = caddyBlock(token)
   assert.equal(text.match(/# BEGIN YARD/g).length, 1)
   assert.match(text, /other\.example\.com/)
-  assert.match(text, /reverse_proxy yard-web:8088 \{\n\s+header_up X-Yard-User \{http\.auth\.user\.id\}\n\s+header_up X-Yard-Proxy-Token a{64}\n\s+\}/)
+  // Both the SSE and the regular handler overwrite the identity headers.
+  const proxies = text.match(/reverse_proxy yard-web:8088 \{[^}]*\{http\.auth\.user\.id\}[^}]*\}/g)
+  assert.equal(proxies.length, 2)
+  for (const proxy of proxies) {
+    assert.match(proxy, /header_up X-Yard-User \{http\.auth\.user\.id\}\n\s+header_up X-Yard-Proxy-Token a{64}/)
+  }
   // header_up must replace (no "+" or "-" prefix), otherwise a client value could pass through.
   assert.doesNotMatch(text, /header_up [+-]/)
 })
@@ -89,4 +94,24 @@ test('job history is group-readable by the container group only, and capped', ()
   assert.match(unit, /^Group=yard-web-ops$/m)
   assert.match(unit, /^Environment=YARD_JOBS_MAX_COUNT=\d+$/m)
   assert.match(unit, /^Environment=YARD_JOBS_MAX_BYTES=\d+$/m)
+})
+
+test('Caddy block never compresses or buffers the SSE routes', () => {
+  const text = caddyBlock('b'.repeat(64))
+  const stream = text.match(/@stream path ([^\n]+)\n\s+handle @stream \{\n([\s\S]*?)\n    \}\n/)
+  assert.ok(stream, text)
+  // The matcher covers exactly the two event-stream routes of the API.
+  assert.equal(stream[1], '/api/logs/stream /api/jobs/*/output')
+  assert.match(stream[2], /flush_interval -1/)
+  assert.doesNotMatch(stream[2], /encode/)
+  // Everything else is compressed, in a handler that comes after the SSE one.
+  const rest = text.match(/\n    handle \{\n\s+encode zstd gzip\n\s+reverse_proxy yard-web:8088 \{/)
+  assert.ok(rest, text)
+  assert.ok(text.indexOf('handle @stream') < text.indexOf(rest[0]))
+  assert.equal(text.match(/encode /g).length, 1)
+  assert.equal(text.match(/flush_interval/g).length, 1)
+  // Same routes the Web server exposes as event streams.
+  const http = read('web/server/http.rs')
+  assert.match(http, /"\/api\/logs\/stream"/)
+  assert.match(http, /"\/api\/jobs\/\{id\}\/output"/)
 })

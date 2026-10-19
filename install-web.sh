@@ -257,18 +257,36 @@ from pathlib import Path
 path = Path(os.environ["CADDYFILE"])
 text = path.read_text(encoding="utf-8")
 text = re.sub(r"\n?# BEGIN YARD\n.*?# END YARD\n?", "\n", text, flags=re.DOTALL)
+def proxy(flush, indent):
+    lines = [
+        "reverse_proxy yard-web:8088 {",
+        "    # header_up without +/- replaces any client-supplied value of the same header, so",
+        "    # a browser cannot forge the identity or the proxy token.",
+        "    header_up X-Yard-User {http.auth.user.id}",
+        f"    header_up X-Yard-Proxy-Token {os.environ['PROXY_TOKEN']}",
+    ]
+    if flush:
+        lines.append("    flush_interval -1")
+    lines.append("}")
+    return "\n".join(" " * indent + line for line in lines)
+
+
 block = f"""# BEGIN YARD
 {os.environ['DOMAIN']} {{
     {os.environ['AUTH_DIRECTIVE']} {{
         {os.environ['AUTH_USER']} {os.environ['CADDY_HASH']}
     }}
 
-    encode zstd gzip
-    # header_up without +/- replaces any client-supplied value of the same header, so
-    # a browser cannot forge the identity or the proxy token.
-    reverse_proxy yard-web:8088 {{
-        header_up X-Yard-User {{http.auth.user.id}}
-        header_up X-Yard-Proxy-Token {os.environ['PROXY_TOKEN']}
+    # Server-sent events (live job output, log stream) must reach the browser event by event:
+    # no compression (it batches small writes) and no response buffering.
+    @stream path /api/logs/stream /api/jobs/*/output
+    handle @stream {{
+{proxy(True, 8)}
+    }}
+
+    handle {{
+        encode zstd gzip
+{proxy(False, 8)}
     }}
 }}
 # END YARD
