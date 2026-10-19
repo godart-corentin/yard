@@ -9,6 +9,7 @@ import {
 import { Placeholder } from "./components/Placeholder";
 import { HostPage } from "./host/HostPage";
 import { ImagesPage } from "./images/ImagesPage";
+import { LogsTab } from "./logs/LogsTab";
 import { OverviewPage } from "./overview/OverviewPage";
 import { OverviewTab } from "./project/OverviewTab";
 import { ProjectLayout } from "./project/ProjectLayout";
@@ -44,6 +45,7 @@ function projectTab(path: "overview" | "releases" | "logs" | "activity", title: 
       const { name } = projectRoute.useParams();
       if (path === "overview") return <OverviewTab name={name} />;
       if (path === "releases") return <ReleasesTab name={name} />;
+      if (path === "logs") return <LogsTab project={name} />;
       return <Placeholder title={name} subtitle={title} />;
     },
   });

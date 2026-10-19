@@ -46,6 +46,11 @@ const MAX_OUTPUT_STREAMS: usize = 32;
 const LOG_STREAM_MAX: Duration = Duration::from_secs(60 * 60);
 const MAX_LOG_STREAMS: usize = 4;
 const LOG_TEXT_LIMIT: usize = 16 * 1024;
+/// How long `logs_stream` waits for the executor's first frame before it starts the SSE anyway.
+#[cfg(not(test))]
+const FIRST_FRAME_WAIT: Duration = Duration::from_millis(1500);
+#[cfg(test)]
+const FIRST_FRAME_WAIT: Duration = Duration::from_millis(300);
 const LOG_FRAME_LIMIT: u64 = 128 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -874,15 +879,21 @@ fn end_event(reason: &str) -> Bytes {
     )
 }
 
-async fn relay_logs(socket: tokio::net::UnixStream, tx: mpsc::Sender<Bytes>) {
-    let mut reader = tokio::io::BufReader::new(socket);
+/// Relays executor frames as SSE events. `line` carries whatever `logs_stream`
+/// already read while waiting for the first frame: a complete frame is handled
+/// first, a partial one is completed by the next read.
+async fn relay_logs(
+    mut reader: tokio::io::BufReader<tokio::net::UnixStream>,
+    tx: mpsc::Sender<Bytes>,
+    mut line: Vec<u8>,
+) {
     let deadline = tokio::time::Instant::now() + LOG_STREAM_MAX;
     let mut keepalive_timer = tokio::time::interval(KEEPALIVE);
     keepalive_timer.reset();
-    let mut line = Vec::new();
     loop {
-        line.clear();
-        let outcome = {
+        let outcome = if line.last() == Some(&b'\n') {
+            Some(Ok(line.len()))
+        } else {
             let mut limited = (&mut reader).take(LOG_FRAME_LIMIT);
             let read = limited.read_until(b'\n', &mut line);
             tokio::pin!(read);
@@ -908,6 +919,7 @@ async fn relay_logs(socket: tokio::net::UnixStream, tx: mpsc::Sender<Bytes>) {
             Ok(count) if count > 0 && complete => serde_json::from_slice(&line).ok(),
             _ => None,
         };
+        line.clear();
         let Some(frame) = frame else {
             let _ = tx.send(end_event("error")).await;
             return;
@@ -957,12 +969,53 @@ pub async fn logs_stream(State(app): State<Shared>, uri: Uri) -> Response {
     if !matches!(sent, Ok(Ok(()))) {
         return unavailable();
     }
+    // Read the first frame before committing to a 200: the executor answers a
+    // refused or over-limit request with a single `{"error":...}` line.
+    let mut reader = tokio::io::BufReader::new(socket);
+    let mut line = Vec::new();
+    let first = {
+        let mut limited = (&mut reader).take(LOG_FRAME_LIMIT);
+        tokio::time::timeout(FIRST_FRAME_WAIT, limited.read_until(b'\n', &mut line)).await
+    };
+    match first {
+        // Quiet stream: start the SSE; any partial bytes stay in `line`.
+        Err(_) => {}
+        Ok(Ok(count)) if count > 0 => {
+            if line.last() == Some(&b'\n') {
+                if let Some(message) =
+                    serde_json::from_slice::<Value>(&line)
+                        .ok()
+                        .and_then(|frame| {
+                            frame
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                {
+                    return executor_error(&message);
+                }
+            }
+        }
+        // EOF before any frame, or a read error: the executor is not serving us.
+        Ok(_) => return unavailable(),
+    }
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         let _slot = slot;
-        relay_logs(socket, tx).await;
+        relay_logs(reader, tx, line).await;
     });
     sse_response(rx)
+}
+
+/// Maps the executor's initial `{"error":...}` line to an HTTP error.
+fn executor_error(message: &str) -> Response {
+    if message.contains("refused") {
+        refused()
+    } else if message.contains("unavailable") {
+        too_many_streams()
+    } else {
+        unavailable()
+    }
 }
 
 #[cfg(test)]
@@ -1679,6 +1732,66 @@ mod tests {
             sent,
             json!({"op":"logs-follow","project":"demo","service":"api","tail":7,"since":"10m"})
         );
+    }
+
+    #[test]
+    fn logs_stream_maps_an_initial_executor_error_before_streaming() {
+        for (reply, status) in [
+            (r#"{"error":"Read operation refused"}"#, "400"),
+            (r#"{"error":"Read operation unavailable"}"#, "429"),
+            (r#"{"error":"something else"}"#, "503"),
+        ] {
+            let fixture = Fixture::new("logs-initial-error", Some(TOKEN));
+            let _rx = fixture.fake_ops_on("read.sock", &[reply.to_owned()]);
+            let (head, body) = fixture.get("/api/logs/stream?project=demo", "");
+            assert!(status_line(&head).contains(status), "{reply}: {head}");
+            assert!(head.to_ascii_lowercase().contains("application/json"));
+            let code = json_body(&body)["code"].clone();
+            assert_eq!(
+                code,
+                if status == "503" {
+                    "executor_unavailable"
+                } else {
+                    "refused"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn logs_stream_is_unavailable_when_the_executor_closes_without_a_frame() {
+        let fixture = Fixture::new("logs-eof", Some(TOKEN));
+        let listener = UnixListener::bind(fixture.root.join("read.sock")).unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 512];
+            let _ = stream.read(&mut buffer).unwrap();
+        });
+        let (head, body) = fixture.get("/api/logs/stream?project=demo", "");
+        assert!(status_line(&head).contains("503"), "{head}");
+        assert_eq!(json_body(&body)["code"], "executor_unavailable");
+    }
+
+    #[test]
+    fn logs_stream_starts_the_sse_when_the_first_frame_is_slow() {
+        let fixture = Fixture::new("logs-slow", Some(TOKEN));
+        let listener = UnixListener::bind(fixture.root.join("read.sock")).unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 512];
+            let _ = stream.read(&mut buffer).unwrap();
+            thread::sleep(FIRST_FRAME_WAIT * 3);
+            // Split across the timeout boundary: the partial frame must survive.
+            stream.write_all(b"{\"line\":\"sl").unwrap();
+            thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"ow\"}\n{\"end\":\"closed\"}\n").unwrap();
+        });
+        let (head, body) = fixture.get("/api/logs/stream?project=demo", "");
+        assert!(status_line(&head).contains("200"), "{head}");
+        let all = events(&body);
+        assert_eq!(all[0].0, "line");
+        assert_eq!(all[0].2["text"], "slow");
+        assert_eq!(all[1].2["reason"], "closed");
     }
 
     #[test]
