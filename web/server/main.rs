@@ -1345,6 +1345,7 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
     let project = params.remove("project")?;
     if project.is_empty()
         || project.len() > 64
+        || project.starts_with('-')
         || !project
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))

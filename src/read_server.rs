@@ -22,6 +22,8 @@ use crate::status;
 
 const MAX_REQUEST: u64 = 1024;
 const MAX_OUTPUT: u64 = 128 * 1024;
+/// Pause after a failed `accept`, shared with the ops executor.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_FOLLOWS: usize = 4;
 const FOLLOW_LIMIT: Duration = Duration::from_secs(3600);
@@ -60,6 +62,7 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
         _ => return None,
     };
     if project.is_empty()
+        || project.starts_with('-')
         || project.len() > 64
         || !project
             .bytes()
@@ -77,7 +80,7 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     let configured = Project::load(project, projects, Path::new("/dev/null")).ok()?;
     if !matches!(request.op.as_str(), "logs" | "logs-follow") {
         return (request.service.is_none() && request.tail.is_none() && request.since.is_none())
-            .then(|| vec![request.op.clone(), project.to_owned()]);
+            .then(|| vec![request.op.clone(), "--".into(), project.to_owned()]);
     }
     let tail = request.tail.unwrap_or(200);
     if tail == 0
@@ -108,7 +111,6 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     }
     let mut args = vec![
         "logs".into(),
-        project.to_owned(),
         if request.op == "logs-follow" {
             "--follow"
         } else {
@@ -124,6 +126,8 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     if let Some(since) = &request.since {
         args.extend(["--since".into(), since.clone()]);
     }
+    // The project is the only positional; `--` keeps it from ever being read as an option.
+    args.extend(["--".into(), project.to_owned()]);
     Some(args)
 }
 
@@ -446,7 +450,11 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
                     eprintln!("yard read executor request error: {error}");
                 }
             }
-            Err(error) => eprintln!("yard read executor accept error: {error}"),
+            Err(error) => {
+                eprintln!("yard read executor accept error: {error}");
+                // EMFILE and friends repeat immediately: do not spin on them.
+                thread::sleep(ACCEPT_BACKOFF);
+            }
         }
     }
     Ok(())

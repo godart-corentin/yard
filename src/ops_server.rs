@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,20 @@ use crate::state::ProjectState;
 const MAX_REQUEST: u64 = 4096;
 const MAX_CONNECTIONS: usize = 32;
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+const JOBS_MAX_COUNT: &str = "YARD_JOBS_MAX_COUNT";
+const JOBS_MAX_BYTES: &str = "YARD_JOBS_MAX_BYTES";
+
+/// `YARD_JOBS_MAX_COUNT` / `YARD_JOBS_MAX_BYTES` from the unit; `0` disables a cap and an
+/// unparsable value keeps the default.
+fn limits_from_env() -> jobs::Limits {
+    let defaults = jobs::Limits::default();
+    let number = |name: &str| std::env::var(name).ok()?.trim().parse::<u64>().ok();
+    jobs::Limits {
+        max_jobs: number(JOBS_MAX_COUNT).map_or(defaults.max_jobs, |value| value as usize),
+        max_bytes: number(JOBS_MAX_BYTES).unwrap_or(defaults.max_bytes),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Timeouts {
@@ -72,6 +86,10 @@ pub struct Config {
     /// Delay between SIGTERM and SIGKILL of a timed out job.
     pub kill_grace: Duration,
     pub output_cap: u64,
+    /// Caps on the stored job history (oldest finished jobs are pruned first).
+    pub limits: jobs::Limits,
+    /// How long to wait for the output pipe to close once the job's process group is gone.
+    pub pump_grace: Duration,
     pub refresh: Duration,
 }
 
@@ -93,6 +111,8 @@ impl Config {
             if key.to_str().is_some_and(|key| key.starts_with("YARD_"))
                 && key != "YARD_PROJECTS_DIR"
                 && key != "YARD_STATE_DIR"
+                && key != JOBS_MAX_COUNT
+                && key != JOBS_MAX_BYTES
             {
                 env.push((key, value));
             }
@@ -109,6 +129,8 @@ impl Config {
             timeouts: Timeouts::default(),
             kill_grace: Duration::from_secs(10),
             output_cap: 16 * 1024 * 1024,
+            limits: limits_from_env(),
+            pump_grace: Duration::from_secs(5),
             refresh: Duration::from_secs(1),
         }
     }
@@ -190,6 +212,8 @@ pub struct Executor {
     config: Config,
     jobs_dir: PathBuf,
     locks: Mutex<Locks>,
+    /// Serializes cleanup passes (start, daily, after each job).
+    cleanup: Mutex<()>,
 }
 
 struct Valid {
@@ -265,7 +289,7 @@ fn killpg(pgid: i32, signal: i32) {
 }
 
 /// Copy the merged output to the log, capped. Always drains the pipe so the job never blocks.
-fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64) {
+fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64, abandoned: &AtomicBool) {
     let mut buffer = [0_u8; 8192];
     let mut total = 0_u64;
     let mut finished_writing = false;
@@ -276,6 +300,9 @@ fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64) {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        if abandoned.load(Ordering::Relaxed) {
+            break;
+        }
         if finished_writing {
             continue;
         }
@@ -306,6 +333,7 @@ impl Executor {
             config,
             jobs_dir,
             locks: Mutex::new(Locks::default()),
+            cleanup: Mutex::new(()),
         });
         executor.retain();
         for unfinished in alive {
@@ -316,9 +344,19 @@ impl Executor {
         Ok(executor)
     }
 
+    /// Age retention, then the storage caps. Failures are reported and never stop the pass.
     pub fn retain(&self) {
-        if let Err(error) = jobs::retain(&self.jobs_dir, jobs::now_unix(), jobs::RETENTION) {
+        let _serial = self.cleanup.lock();
+        let aged = jobs::retain(&self.jobs_dir, jobs::now_unix(), jobs::RETENTION);
+        let capped = jobs::enforce_limits(&self.jobs_dir, self.config.limits);
+        for error in aged.errors.iter().chain(&capped.errors) {
             eprintln!("yard ops executor retention error: {error}");
+        }
+        if aged.removed + capped.removed > 0 {
+            eprintln!(
+                "yard ops executor retention: removed {} job(s) by age, {} by storage cap",
+                aged.removed, capped.removed
+            );
         }
     }
 
@@ -375,7 +413,7 @@ impl Executor {
     }
 
     fn project(&self, name: &str) -> std::result::Result<Project, String> {
-        if name == "host" || !valid_name(name, b"-_", 64) {
+        if name == "host" || !valid_name(name, b"-_", 64) || name.starts_with('-') {
             return Err("Invalid project".into());
         }
         let known = Project::list(&self.config.projects_dir)
@@ -450,6 +488,7 @@ impl Executor {
                     if action == Action::Backup && project.config.backup.is_none() {
                         return Err("Project has no backup command".into());
                     }
+                    // `--` ends the options: the name is never an option, whatever it contains.
                     argv.extend([
                         if action == Action::Deploy {
                             "deploy"
@@ -457,6 +496,7 @@ impl Executor {
                             "backup"
                         }
                         .to_owned(),
+                        "--".to_owned(),
                         name.to_owned(),
                     ]);
                 }
@@ -469,7 +509,7 @@ impl Executor {
                         return Err("Revision is not a restore point".into());
                     }
                     revision = Some(target.to_owned());
-                    argv.extend(["restore", name, target, "--yes"].map(String::from));
+                    argv.extend(["restore", "--yes", "--", name, target].map(String::from));
                 }
             }
         }
@@ -601,13 +641,20 @@ impl Executor {
         pipe: File,
         log: File,
         mut job: Job,
-        _guard: LockGuard,
+        guard: LockGuard,
     ) {
         let pgid = child.id() as i32;
         let written = Arc::new(AtomicU64::new(0));
         let pump_written = written.clone();
         let cap = self.config.output_cap;
-        let pump = thread::spawn(move || pump(pipe, log, cap, &pump_written));
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let pump_abandoned = abandoned.clone();
+        let mut note = log.try_clone().ok();
+        let (pumped, pump_done) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            pump(pipe, log, cap, &pump_written, &pump_abandoned);
+            let _ = pumped.send(());
+        });
         let timeout = self.config.timeouts.of(job.action);
         let started = Instant::now();
         let mut refreshed = (Instant::now(), 0_u64);
@@ -644,7 +691,20 @@ impl Executor {
         };
         // Whatever the job left behind must not outlive it, nor keep the pipe open.
         killpg(pgid, libc::SIGKILL);
-        let _ = pump.join();
+        // A descendant that called setsid() escapes the group kill and can hold the pipe open
+        // forever; waiting for EOF without a bound would keep the job running and its lock held.
+        if pump_done.recv_timeout(self.config.pump_grace).is_err() {
+            abandoned.store(true, Ordering::Relaxed);
+            if let Some(log) = note.as_mut() {
+                let _ = log.write_all(
+                    b"\n[output closed: a leftover process kept the output pipe open]\n",
+                );
+            }
+            eprintln!(
+                "yard ops executor: job {} left a process holding its output pipe",
+                job.id
+            );
+        }
         let (state, code, error) = match status {
             _ if timed_out => (
                 State::Failed,
@@ -672,6 +732,10 @@ impl Executor {
             ),
         };
         self.finish(&mut job, state, code, error);
+        // Free the project before the cleanup pass, so a client that saw the job end can start
+        // the next one at once. The history only grows when a job ends: enforce the caps now.
+        drop(guard);
+        self.retain();
     }
 
     fn finish(&self, job: &mut Job, state: State, code: Option<i32>, error: Option<String>) {
@@ -731,7 +795,11 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
-            Err(error) => eprintln!("yard ops executor accept error: {error}"),
+            Err(error) => {
+                eprintln!("yard ops executor accept error: {error}");
+                // EMFILE and friends repeat immediately: do not spin on them.
+                thread::sleep(read_server::ACCEPT_BACKOFF);
+            }
         }
     }
     Err(YardError::Config("ops listener closed".into()))
@@ -741,7 +809,7 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     struct Fixture {
         root: PathBuf,
@@ -756,7 +824,7 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(root.join("projects")).unwrap();
             fs::create_dir_all(root.join("state")).unwrap();
-            for project in ["ok", "fail", "slow", "stubborn", "big", "other"] {
+            for project in ["ok", "fail", "slow", "stubborn", "big", "other", "leaky"] {
                 fs::write(
                     root.join(format!("projects/{project}.toml")),
                     format!(
@@ -789,9 +857,9 @@ mod tests {
                 fs::write(root.join(format!("{name}.sh")), body).unwrap();
             };
             // Project actions are routed by action name; the project picks the behaviour.
-            script("backup", "exec sh \"$(dirname \"$0\")/p-$6.sh\"\n");
-            script("deploy", "exec sh \"$(dirname \"$0\")/p-$6.sh\"\n");
-            script("restore", "echo restoring \"$6\" \"$7\" \"$8\"\n");
+            script("backup", "exec sh \"$(dirname \"$0\")/p-$7.sh\"\n");
+            script("deploy", "exec sh \"$(dirname \"$0\")/p-$7.sh\"\n");
+            script("restore", "echo restoring \"$8\" \"$9\" \"$6\"\n");
             script("host", "echo host; echo oops >&2\n");
             script("images", "echo \"$@\"\nsleep 0.3\n");
             script("p-ok", "echo out; echo err >&2\n");
@@ -803,6 +871,11 @@ mod tests {
             );
             script("p-big", "yes x | head -c 100000\n");
             script("p-other", "sleep 0.5\n");
+            // A setsid descendant escapes the group kill and keeps the output pipe open.
+            script(
+                "p-leaky",
+                "echo before\nsetsid sleep 20 &\necho $! > \"$(dirname \"$0\")/leaky.pid\"\n",
+            );
             let mut config = Config::production(&root.join("projects"), &root.join("state"));
             config.program = program;
             config.env = vec![("PATH".into(), std::env::var_os("PATH").unwrap())];
@@ -875,14 +948,13 @@ mod tests {
             jobs::json_path(&f.jobs(), &id),
             jobs::log_path(&f.jobs(), &id),
         ] {
-            assert_eq!(
-                fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o644
-            );
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+            assert_eq!(metadata.gid(), fs::metadata(f.jobs()).unwrap().gid());
         }
         assert_eq!(
-            fs::metadata(f.jobs()).unwrap().permissions().mode() & 0o777,
-            0o755
+            fs::metadata(f.jobs()).unwrap().permissions().mode() & 0o7777,
+            0o2750
         );
         assert!(!jobs::pid_path(&f.jobs(), &id).exists());
     }
@@ -945,6 +1017,8 @@ mod tests {
             json!({"action": "deploy", "project": "host"}),
             json!({"action": "deploy", "project": "../ok"}),
             json!({"action": "deploy", "project": "ok;ls"}),
+            json!({"action": "deploy", "project": "-ok"}),
+            json!({"action": "backup", "project": "--help"}),
             json!({"action": "deploy", "project": "ok", "revision": "abc123"}),
             json!({"action": "backup", "project": "nobackup"}),
             json!({"action": "restore", "project": "ok", "confirm": true}),
@@ -1027,7 +1101,9 @@ mod tests {
         // Kill the slow job's group so the fixture does not leave a sleeper behind.
         let pgid: i32 = fs::read_to_string(jobs::pid_path(&f.jobs(), &slow))
             .unwrap()
-            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap()
             .parse()
             .unwrap();
         killpg(pgid, libc::SIGKILL);
@@ -1068,6 +1144,31 @@ mod tests {
         let again = f.start(json!({"action": "backup", "project": "stubborn"}));
         assert_eq!(again["ok"], true);
         f.wait(&Fixture::id(&again));
+    }
+
+    #[test]
+    fn a_setsid_descendant_holding_the_pipe_does_not_pin_the_job_or_its_lock() {
+        let f = Fixture::new("leaky", |config| {
+            config.pump_grace = Duration::from_millis(300);
+        });
+        let started = Instant::now();
+        let id = Fixture::id(&f.start(json!({"action": "backup", "project": "leaky"})));
+        let job = f.wait(&id);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(job.state, State::Succeeded);
+        let log = f.log(&id);
+        assert!(log.starts_with("before\n"), "{log}");
+        assert!(log.contains("[output closed: a leftover process"), "{log}");
+        assert_eq!(job.output_bytes, log.len() as u64);
+        // The project lock was released although the descendant still lives.
+        let again = f.start(json!({"action": "backup", "project": "leaky"}));
+        assert_eq!(again["ok"], true, "{again}");
+        f.wait(&Fixture::id(&again));
+        if let Ok(pid) = fs::read_to_string(f.root.join("leaky.pid")) {
+            if let Ok(pid) = pid.trim().parse::<i32>() {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
     }
 
     #[test]
@@ -1122,9 +1223,35 @@ mod tests {
         let pgid: i32 =
             fs::read_to_string(jobs::pid_path(&dir, reply["job"]["id"].as_str().unwrap()))
                 .unwrap()
-                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap()
                 .parse()
                 .unwrap();
         killpg(pgid, libc::SIGKILL);
+    }
+
+    #[test]
+    fn finished_jobs_beyond_the_count_cap_are_pruned() {
+        let f = Fixture::new("cap-count", |config| {
+            config.limits = jobs::Limits {
+                max_jobs: 2,
+                max_bytes: 0,
+            };
+        });
+        let mut last = String::new();
+        for _ in 0..4 {
+            last = Fixture::id(&f.start(json!({"action": "backup", "project": "ok"})));
+            f.wait(&last);
+            // Finish times have a one second resolution; keep the order of the jobs unambiguous.
+            thread::sleep(Duration::from_millis(1100));
+        }
+        let kept = fs::read_dir(f.jobs())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .count();
+        assert_eq!(kept, 2);
+        assert!(jobs::json_path(&f.jobs(), &last).exists());
     }
 }

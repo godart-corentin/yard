@@ -85,7 +85,7 @@ fn refused() -> Response {
     api_error(StatusCode::BAD_REQUEST, ApiErrorCode::Refused, None)
 }
 
-fn forbidden() -> Response {
+pub(crate) fn forbidden() -> Response {
     api_error(StatusCode::FORBIDDEN, ApiErrorCode::Forbidden, None)
 }
 
@@ -132,6 +132,7 @@ pub fn valid_job_id(id: &str) -> bool {
 fn valid_project_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
+        && !name.starts_with('-')
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -145,7 +146,7 @@ fn valid_actor(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'@' | b'-'))
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let mut difference = left.len() ^ right.len();
     for index in 0..left.len().max(right.len()) {
         let a = left.get(index).copied().unwrap_or(0);
@@ -1144,7 +1145,19 @@ mod tests {
             self.send(&raw)
         }
 
+        /// GET as Caddy would send it: with the proxy token when one is configured.
         fn get(&self, path: &str, extra: &str) -> (String, String) {
+            let token = self
+                .app
+                .config
+                .proxy_token
+                .as_deref()
+                .map(|token| format!("X-Yard-Proxy-Token: {token}\r\n"))
+                .unwrap_or_default();
+            self.get_untrusted(path, &format!("{token}{extra}"))
+        }
+
+        fn get_untrusted(&self, path: &str, extra: &str) -> (String, String) {
             self.send(&format!(
                 "GET {path} HTTP/1.1\r\nHost: yard.test\r\nConnection: close\r\n{extra}\r\n"
             ))
@@ -1184,6 +1197,19 @@ mod tests {
             "started_at_unix": 2, "finished_at_unix": null, "exit_code": null,
             "output_bytes": 0, "error": null}})
         .to_string()
+    }
+
+    #[test]
+    fn project_names_cannot_start_with_a_dash() {
+        assert!(valid_project_name("demo-1_x"));
+        for bad in ["", "-demo", "--help", "a b", "../x"] {
+            assert!(!valid_project_name(bad), "{bad}");
+        }
+        let fixture = Fixture::new("dashname", Some(TOKEN));
+        for project in ["-demo", "--help"] {
+            let uri = format!("/api/read?op=logs&project={project}");
+            assert!(crate::read_request(&uri, &fixture.app.config).is_none());
+        }
     }
 
     #[test]
@@ -1323,6 +1349,56 @@ mod tests {
         let open = Fixture::new("csrf-open", None);
         let (head, _) = open.post(&good_headers(), body);
         assert!(status_line(&head).contains("403"));
+    }
+
+    #[test]
+    fn every_api_route_needs_the_proxy_token_but_healthz_and_static_stay_open() {
+        let fixture = Fixture::new("api-gate", Some(TOKEN));
+        fixture.write_job(ID_A, "backup", "succeeded", Some("demo"), 0);
+        let routes = [
+            "/api/status".to_owned(),
+            "/api/read?op=logs".to_owned(),
+            "/api/jobs".to_owned(),
+            format!("/api/jobs/{ID_A}"),
+            format!("/api/jobs/{ID_A}/output"),
+            "/api/logs/stream?project=demo".to_owned(),
+            "/api/unknown".to_owned(),
+        ];
+        for route in &routes {
+            for extra in [
+                "",
+                "X-Yard-Proxy-Token: nope\r\n",
+                "X-Yard-User: corentin\r\n",
+            ] {
+                let (head, body) = fixture.get_untrusted(route, extra);
+                assert!(
+                    status_line(&head).contains("403"),
+                    "{route} {extra}: {head}"
+                );
+                assert_eq!(json_body(&body)["code"], "forbidden");
+                assert!(!body.contains(TOKEN));
+            }
+            let (head, _) = fixture.get(route, "");
+            assert!(!status_line(&head).contains("403"), "{route}: {head}");
+        }
+        let (head, _) = fixture.get_untrusted("/healthz", "");
+        assert!(status_line(&head).contains("200"), "{head}");
+        let (head, _) = fixture.get_untrusted("/favicon.svg", "");
+        assert!(!status_line(&head).contains("403"), "{head}");
+        let (head, _) = fixture.get_untrusted("/jobs", "");
+        assert!(!status_line(&head).contains("403"), "{head}");
+    }
+
+    #[test]
+    fn without_a_configured_token_reads_work_and_mutations_stay_forbidden() {
+        let fixture = Fixture::new("api-open", None);
+        fixture.write_job(ID_A, "backup", "succeeded", Some("demo"), 0);
+        for route in ["/api/status", "/api/jobs", &format!("/api/jobs/{ID_A}")] {
+            let (head, _) = fixture.get_untrusted(route, "");
+            assert!(status_line(&head).contains("200"), "{route}: {head}");
+        }
+        let (head, _) = fixture.post(&good_headers(), r#"{"action":"deploy","project":"demo"}"#);
+        assert!(status_line(&head).contains("403"), "{head}");
     }
 
     #[test]
@@ -1845,7 +1921,7 @@ mod tests {
         };
         let mut client = std::net::TcpStream::connect(address).unwrap();
         client
-            .write_all(b"GET /api/logs/stream?project=demo HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(format!("GET /api/logs/stream?project=demo HTTP/1.1\r\nHost: x\r\nX-Yard-Proxy-Token: {TOKEN}\r\n\r\n").as_bytes())
             .unwrap();
         let mut seen = Vec::new();
         let mut buffer = [0u8; 1024];
@@ -1888,10 +1964,10 @@ mod tests {
     fn job_routes_reject_other_methods() {
         let fixture = Fixture::new("methods", Some(TOKEN));
         let (head, _) =
-            fixture.send("DELETE /api/jobs HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            fixture.send(&format!("DELETE /api/jobs HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Yard-Proxy-Token: {TOKEN}\r\n\r\n"));
         assert!(status_line(&head).contains("405"));
         let (head, _) =
-            fixture.send("POST /api/jobs/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            fixture.send(&format!("POST /api/jobs/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\nX-Yard-Proxy-Token: {TOKEN}\r\n\r\n"));
         assert!(status_line(&head).contains("405"));
     }
 

@@ -113,9 +113,10 @@ yard-web     read-only mounts, no Docker socket, unprivileged, read-only root fi
   accepts a closed set of actions and builds each command line from a fixed template, so the request
   cannot choose a command or free-form arguments. See "Security" for its privileges.
 - **Job storage**: the ops executor writes `/var/lib/yard/jobs/<id>.json` (state, atomically replaced)
-  and `<id>.log` (append-only output, capped at 16 MiB) and removes terminal jobs after 90 days. Web
-  reads these files through the state mount it already has, so job history and output stay readable
-  while the executor is down. Web never writes there.
+  and `<id>.log` (append-only output, capped at 16 MiB), removes terminal jobs after 90 days and keeps the
+  history under a cap (500 jobs and 512 MiB by default, oldest finished jobs first). Web reads these files
+  through the state mount it already has, so job history and output stay readable while the executor is
+  down. Web never writes there.
 
 Each executor socket is a separate directory with its own group (`yard-web-read`, `yard-web-ops`);
 the Web container user joins both groups, and nothing else on the host does by default.
@@ -147,7 +148,10 @@ The installer:
 4. creates, once, a random proxy token in `/opt/yard/web.env` (root, mode 0600) and reuses it on
    re-installs and updates; the token is never printed;
 5. writes the Yard block in the Caddyfile: Basic Auth (password hash only) and, in `reverse_proxy`,
-   `header_up X-Yard-User {http.auth.user.id}` and `header_up X-Yard-Proxy-Token <token>`;
+   `header_up X-Yard-User {http.auth.user.id}` and `header_up X-Yard-Proxy-Token <token>`. The two
+   server-sent-event routes (`/api/logs/stream`, `/api/jobs/*/output`) get their own `handle @stream` with
+   `flush_interval -1` and no `encode`, so events are neither compressed nor buffered; every other route is
+   served by a `handle` that applies `encode zstd gzip`;
 6. installs and starts `yard-web-read.service` and `yard-web-ops.service`, and waits for their sockets;
 7. mounts `/etc/yard/projects`, `/var/lib/yard` and both socket directories **read-only** into `yard-web`;
 8. builds the React frontend (Node) and the Rust server in a multi-stage Docker build and starts the
@@ -172,12 +176,14 @@ restarts the units.
 
 ### Proxy identity
 
-Yard Web accepts a mutation only when the request carries the proxy token. Caddy adds it, and the user
+Yard Web serves every `/api/*` route (status, reads, job list and output, the SSE log stream and mutations)
+only when the request carries the proxy token; `/healthz` and the static UI files stay open. Caddy adds it, and the user
 name, to every proxied request. `header_up <name> <value>` **replaces** any value the client sent for
 that header (it only appends with a `+` prefix, which the installer does not use), so a browser cannot
 choose its own identity or supply the token. Web compares the token in constant time, validates the user
-name as `[A-Za-z0-9._@-]{1,64}`, and never echoes either value. With no `YARD_WEB_PROXY_TOKEN` configured,
-every mutation is refused: Web falls back to read-only.
+name as `[A-Za-z0-9._@-]{1,64}`, and never echoes either value. A missing or wrong token on `/api/*` is
+`403 forbidden`. With no `YARD_WEB_PROXY_TOKEN` configured (for example a plain `docker run`), the gate is off so
+the read-only dashboard keeps working (`GET /api/*` answers), while every mutation is still refused with `403`.
 
 The token protects against **other containers on the shared Caddy network** talking to `yard-web:8088`
 directly. Be aware where it lives: in clear in the Caddyfile (and so in Caddy's loaded configuration, which
@@ -234,7 +240,7 @@ The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` wi
 thresholds and the statuses computed by the CLI. Web does not recompute warnings. The host view becomes
 `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300
 seconds (`YARD_WEB_HOST_MAX_AGE_SECONDS`). A configured project with no Compose containers yet is
-`Unknown`; only a stopped container is `Critical`. The project name `host` is reserved.
+`Unknown`; only a stopped container is `Critical`. The project name `host` is reserved, and a name starting with `-` is refused everywhere (CLI, Web, executors; `yard list` skips such a manifest).
 
 Reads show the actual bounded CLI output or an explicit unavailable state. `400` means refused, `503`
 the executor could not answer, `502` a command failure, timeout, output limit or invalid reply. The UI
@@ -280,8 +286,9 @@ reading status. Concretely:
   `same-origin` when present, and `Origin` must match the host. Browsers send Basic Auth credentials automatically,
   which is why these checks matter.
 - **The proxy token** (see above) stops containers on the Caddy network from forging an identity or bypassing
-  the Basic Auth. GET endpoints do not need the token: any container on that network can read status,
-  logs and job output without authenticating. Do not attach untrusted containers to the Caddy network.
+  the Basic Auth. Every `/api/*` route, GET and SSE included, requires it, so such a container cannot read
+  status, logs or job output either. Only `/healthz` and the static UI are open. Without a configured token
+  reads are open (read-only mode) and mutations are refused.
 - **Sockets**: the ops socket is mode 0660 in a 0750 directory owned by the dedicated `yard-web-ops` group. Only
   members of that group (the Web container) can start jobs. Anyone who can join that group, or compromise the
   `yard-web` process, can ask the executor for the same five actions, and nothing else.
@@ -290,9 +297,10 @@ reading status. Concretely:
   when the job ends. Output is capped at 16 MiB. At most 32 job output streams and 4 live log streams are open
   at once (1 or 2 hours each). Stopping the executor ends running jobs.
 - **Job output is visible and stored in clear.** `deploy`, `backup` and `restore` print whatever the CLI and the
-  commands it runs print, and `/var/lib/yard/jobs/*.log` is mode 0644 in a 0755 directory so that the read-only
-  state mount works. Every authenticated user, the `yard-web` container, and every local user on the host
-  can read it for 90 days. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
+  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 2750 with files 0640, so that the read-only
+  state mount works through the container's `yard-web-ops` supplementary group (`group_add` in the Compose file)
+  and other local users cannot read it. Every authenticated user, the `yard-web` container, root and members of
+  `yard-web-ops` can read it, for 90 days at most. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
   redact output.
 
 ## Hardening checklist

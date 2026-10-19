@@ -18,6 +18,17 @@ ops_group_gid() {
   printf '%s\n' "$gid"
 }
 
+# Job history readable by the yard-web-ops group (the Web container's supplementary group, through
+# its read-only /var/lib/yard mount) and by nobody else. The executor enforces the same layout when
+# it starts; doing it here also covers files of an older install before the new unit runs.
+prepare_ops_jobs_dir() {
+  local state="${1:-/var/lib/yard}" jobs
+  jobs="${state}/jobs"
+  install -d -o root -g yard-web-ops -m 2750 "$jobs" || return 1
+  find "$jobs" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' \) \
+    -exec chgrp yard-web-ops {} + -exec chmod 0640 {} + || return 1
+}
+
 ops_service_status() {
   systemctl show yard-web-ops.service \
     --property=ActiveState --property=Result --property=ExecMainStatus >&2 || true
