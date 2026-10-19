@@ -1,5 +1,7 @@
 # Yard Web status and read-only operations
 
+The contract for running CLI actions from Web as jobs (planned) is in [web-jobs.md](web-jobs.md).
+
 Yard Web is an optional private status page for the projects already configured in Yard.
 It does not introduce a second project inventory: `/etc/yard/projects/*.toml` remains the source of truth.
 
