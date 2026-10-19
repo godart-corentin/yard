@@ -116,6 +116,11 @@ echo "Yard Web will use Caddy network: ${PROXY_NETWORK}"
 STATE_GID="$(stat -c '%g' /var/lib/yard)"
 READ_GROUP_GID="$(read_group_gid)" || die "cannot provision dedicated read executor group"
 OPS_GROUP_GID="$(ops_group_gid)" || die "cannot provision dedicated ops executor group"
+read -r OPS_USER OPS_USER_GROUP <<< "$(ops_deploy_user /var/lib/yard)" \
+  || die "cannot determine the deploy user that owns /var/lib/yard"
+[[ -n "$OPS_USER" ]] || die "cannot determine the deploy user that owns /var/lib/yard"
+id -nG "$OPS_USER" | tr ' ' '\n' | grep -qx docker \
+  || die "deploy user ${OPS_USER} must be in the docker group to run Web actions"
 mkdir -p "$YARD_ROOT"
 
 # Shared secret between Caddy and yard-web: Web only honors X-Yard-User when the proxy presents it.
@@ -340,9 +345,11 @@ install -o root -g root -m 0644 "${WEB_SOURCE}/yard-web-read.service" /etc/syste
 start_read_service
 wait_read_socket /run/yard-web-read/read.sock
 
-# The ops executor runs Docker, Git and backup commands; Web only gets its group-protected socket.
-install -o root -g root -m 0644 "${OPS_SOURCE}/yard-web-ops.service" /etc/systemd/system/yard-web-ops.service
-prepare_ops_jobs_dir /var/lib/yard || die "cannot prepare /var/lib/yard/jobs"
+# The ops executor runs Docker, Git and backup commands as the deploy user; Web only gets its
+# group-protected socket.
+install_ops_unit "${OPS_SOURCE}/yard-web-ops.service" /etc/systemd/system/yard-web-ops.service \
+  "$OPS_USER" "$OPS_USER_GROUP" || die "cannot install yard-web-ops.service"
+prepare_ops_jobs_dir /var/lib/yard "$OPS_USER" || die "cannot prepare /var/lib/yard/jobs"
 start_ops_service
 wait_ops_socket /run/yard-web-ops/ops.sock
 

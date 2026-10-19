@@ -18,15 +18,45 @@ ops_group_gid() {
   printf '%s\n' "$gid"
 }
 
+# The executor runs as the deploy user, the owner of the state directory: the user whose `yard`
+# commands own the repositories, Compose files and backups. Root is refused, since Git rejects
+# repositories owned by another user and root-written files would break that user's next CLI run.
+ops_deploy_user() {
+  local state="${1:-/var/lib/yard}" user group
+  user="$(stat -c '%U' "$state")" || return 1
+  if [[ "$user" == root || "$user" == UNKNOWN || ! "$user" =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
+    echo "yard web install: ${state} must be owned by the deploy user, not ${user}" >&2
+    return 1
+  fi
+  group="$(id -gn "$user")" || return 1
+  if [[ ! "$group" =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
+    echo "yard web install: invalid primary group for ${user}" >&2
+    return 1
+  fi
+  printf '%s %s\n' "$user" "$group"
+}
+
+install_ops_unit() {
+  local source="$1" target="$2" user="$3" group="$4"
+  sed -e "s/@DEPLOY_USER@/${user}/g" -e "s/@DEPLOY_GROUP@/${group}/g" "$source" > "${target}.new" \
+    && chown root:root "${target}.new" && chmod 0644 "${target}.new" \
+    && mv -f "${target}.new" "$target"
+}
+
 # Job history readable by the yard-web-ops group (the Web container's supplementary group, through
 # its read-only /var/lib/yard mount) and by nobody else. The executor enforces the same layout when
-# it starts; doing it here also covers files of an older install before the new unit runs.
+# it starts; doing it here also covers files of an older install before the new unit runs. Files an
+# older root executor left (job history, state written by a Web job) go back to the deploy user.
 prepare_ops_jobs_dir() {
-  local state="${1:-/var/lib/yard}" jobs
+  local state="${1:-/var/lib/yard}" user="$2" jobs
   jobs="${state}/jobs"
-  install -d -o root -g yard-web-ops -m 0750 "$jobs" || return 1
+  install -d -o "$user" -g yard-web-ops -m 0750 "$jobs" || return 1
+  chown "$user" "$jobs" || return 1
+  find "$jobs" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' -o -name '*.pid' \) \
+    -exec chown "${user}:yard-web-ops" {} + || return 1
   find "$jobs" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' \) \
-    -exec chgrp yard-web-ops {} + -exec chmod 0640 {} + || return 1
+    -exec chmod 0640 {} + || return 1
+  find "$state" -maxdepth 1 -type f -name '*.json' -user root -exec chown "${user}:" {} + || return 1
 }
 
 ops_service_status() {
