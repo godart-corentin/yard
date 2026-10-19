@@ -11,6 +11,8 @@ Group=yard-web-read
 UMask=0007
 RuntimeDirectory=yard-web-read
 RuntimeDirectoryMode=0750
+# Keep the directory (same inode) across restarts so the container bind mount stays valid.
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/yard read-server --socket /run/yard-web-read/read.sock
 Restart=on-failure
 RestartSec=2

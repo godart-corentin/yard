@@ -31,6 +31,13 @@ if docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq 'yard-web'; then
   else
     echo "Yard Web ops executor is not installed. Run install-web.sh to enable Web actions."
   fi
+  # The proxy token lives in /opt/yard/web.env (root, 0600), created by install-web.sh and
+  # reused by every update. Without it Web actions answer 403.
+  if [[ -f /opt/yard/docker-compose.yml ]] \
+    && ! grep -q '/opt/yard/web.env' /opt/yard/docker-compose.yml
+  then
+    echo "Yard Web proxy identity is not wired yet (no /opt/yard/web.env). Run install-web.sh to enable Web actions."
+  fi
   if [[ -f /opt/yard/docker-compose.yml ]] \
     && grep -q '^[[:space:]]*build:' /opt/yard/docker-compose.yml
   then

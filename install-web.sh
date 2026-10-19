@@ -17,6 +17,9 @@ REPO_WEB_SOURCE="${SOURCE_DIR}/web"
 INSTALLED_WEB_SOURCE="/usr/local/share/yard/web-src"
 YARD_ROOT="/opt/yard"
 YARD_COMPOSE="${YARD_ROOT}/docker-compose.yml"
+# Root-only env file (0600) holding the proxy token; Compose reads it as root at `up` time,
+# so update.sh keeps working without ever printing or exporting the token.
+YARD_WEB_ENV="${YARD_ROOT}/web.env"
 CADDY_CONTAINER="${YARD_CADDY_CONTAINER:-caddy}"
 AUTH_USER="${YARD_WEB_USER:-}"
 
@@ -115,6 +118,24 @@ READ_GROUP_GID="$(read_group_gid)" || die "cannot provision dedicated read execu
 OPS_GROUP_GID="$(ops_group_gid)" || die "cannot provision dedicated ops executor group"
 mkdir -p "$YARD_ROOT"
 
+# Shared secret between Caddy and yard-web: Web only honors X-Yard-User when the proxy presents it.
+# Generated once and reused by re-installs and updates. Never printed.
+PROXY_TOKEN=""
+if [[ -f "$YARD_WEB_ENV" ]]; then
+  PROXY_TOKEN="$(sed -n 's/^YARD_WEB_PROXY_TOKEN=//p' "$YARD_WEB_ENV" | head -n1)"
+fi
+if [[ ! "$PROXY_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+  PROXY_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  [[ "$PROXY_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "cannot generate the proxy token"
+fi
+(
+  umask 077
+  printf 'YARD_WEB_PROXY_TOKEN=%s\n' "$PROXY_TOKEN" >"${YARD_WEB_ENV}.new"
+)
+chmod 0600 "${YARD_WEB_ENV}.new"
+chown root:root "${YARD_WEB_ENV}.new"
+mv -f "${YARD_WEB_ENV}.new" "$YARD_WEB_ENV"
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 TMP_COMPOSE="${TMP_DIR}/docker-compose.yml"
@@ -135,6 +156,8 @@ services:
       - "${STATE_GID}"
       - "${READ_GROUP_GID}"
       - "${OPS_GROUP_GID}"
+    env_file:
+      - ${YARD_WEB_ENV}
     environment:
       YARD_WEB_HOST: "0.0.0.0"
       YARD_WEB_PORT: "8088"
@@ -221,6 +244,7 @@ cp "$CADDYFILE" "$TMP_CADDYFILE"
 write_caddy_block() {
   local directive="$1"
   DOMAIN="$DOMAIN" \
+  PROXY_TOKEN="$PROXY_TOKEN" \
   AUTH_USER="$AUTH_USER" \
   CADDY_HASH="$CADDY_HASH" \
   AUTH_DIRECTIVE="$directive" \
@@ -240,7 +264,12 @@ block = f"""# BEGIN YARD
     }}
 
     encode zstd gzip
-    reverse_proxy yard-web:8088
+    # header_up without +/- replaces any client-supplied value of the same header, so
+    # a browser cannot forge the identity or the proxy token.
+    reverse_proxy yard-web:8088 {{
+        header_up X-Yard-User {{http.auth.user.id}}
+        header_up X-Yard-Proxy-Token {os.environ['PROXY_TOKEN']}
+    }}
 }}
 # END YARD
 """
@@ -269,10 +298,21 @@ if ! validate_caddy; then
 fi
 
 BACKUP_DIR="${YARD_ROOT}/backups/$(date +%Y%m%d-%H%M%S)"
+# Backups of the Caddyfile hold the proxy token and the Basic Auth hash: root only.
+mkdir -p "${YARD_ROOT}/backups"
+chmod 0700 "${YARD_ROOT}/backups"
 mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
 cp "$CADDYFILE" "$BACKUP_DIR/Caddyfile"
+chmod 0600 "$BACKUP_DIR/Caddyfile"
 if [[ -f "$YARD_COMPOSE" ]]; then
   cp "$YARD_COMPOSE" "$BACKUP_DIR/docker-compose.yml"
+fi
+
+# The proxy token is written in clear in the Caddyfile (and so in Caddy's loaded config).
+# Anyone who can read it, or reach the Caddy admin API, can forge a Yard Web identity.
+if [[ "$(stat -c '%a' "$CADDYFILE")" =~ [0-7][0-7][1-7]$ ]]; then
+  echo "warning: ${CADDYFILE} is readable by other users and now contains the Yard Web proxy token; run: chmod o-rw ${CADDYFILE}" >&2
 fi
 
 install -o root -g root -m 0644 "$TMP_COMPOSE" "$YARD_COMPOSE"
@@ -311,6 +351,7 @@ for _ in $(seq 1 30); do
   if [[ "$HEALTH" == "healthy" ]]; then
     echo "Yard Web installed: https://${DOMAIN}"
     echo "Username: ${AUTH_USER}"
+    echo "Web actions (deploy, backup, restore, prune) run on the host through yard-web-ops.service."
     exit 0
   fi
   [[ "$HEALTH" != "unhealthy" ]] || {
