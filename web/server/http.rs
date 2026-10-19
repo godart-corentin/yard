@@ -1,15 +1,16 @@
 //! HTTP surface of Yard Web, served by axum on a tokio runtime.
 //!
-//! The behavior is intentionally the one of the former hand-rolled server: fixed
-//! routes, a fixed list of static files (no path-derived file access), `no-store`
-//! API responses and the same security headers on every response.
+//! Fixed API routes, `no-store` API responses and the same security headers on
+//! every response. The React build is served from the static directory: hashed
+//! files under `/assets/` (long cache, validated file names only), `favicon.svg`,
+//! and `index.html` as the SPA fallback for extension-less GET paths.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -29,10 +30,7 @@ pub fn router(app: Shared) -> Router {
         .route("/healthz", get(healthz).fallback(method_not_allowed))
         .route("/api/status", get(status).fallback(method_not_allowed))
         .route("/api/read", get(read).fallback(method_not_allowed))
-        .route("/", static_route("index.html"))
-        .route("/index.html", static_route("index.html"))
-        .route("/styles.css", static_route("styles.css"))
-        .route("/app.js", static_route("app.js"))
+        .route("/assets/{name}", get(asset).fallback(method_not_allowed))
         .route("/favicon.svg", static_route("favicon.svg"))
         .fallback(fallback)
         .layer(middleware::from_fn(security_headers))
@@ -107,11 +105,58 @@ async fn method_not_allowed() -> Response {
     text(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
 }
 
-async fn fallback(method: Method) -> Response {
-    if method == Method::GET {
-        text(StatusCode::NOT_FOUND, "Not found\n")
-    } else {
-        method_not_allowed().await
+async fn fallback(State(app): State<Shared>, method: Method, uri: Uri) -> Response {
+    if method != Method::GET {
+        return method_not_allowed().await;
+    }
+    let path = uri.path();
+    let last_segment = path.rsplit('/').next().unwrap_or_default();
+    // API and asset paths, and anything that looks like a file, are never client-side routes.
+    let reserved = ["/api", "/assets"]
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")));
+    if reserved || last_segment.contains('.') {
+        return text(StatusCode::NOT_FOUND, "Not found\n");
+    }
+    static_file(app, "index.html").await
+}
+
+/// Hashed Vite output. The name comes from the URL, so it is restricted to a
+/// flat, conservative character set before it is joined to the directory.
+async fn asset(State(app): State<Shared>, AxumPath(name): AxumPath<String>) -> Response {
+    let valid = !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !valid {
+        return text(StatusCode::NOT_FOUND, "Not found\n");
+    }
+    let path = app.config.static_dir.join("assets").join(&name);
+    let Ok(body) = tokio::fs::read(path).await else {
+        return text(StatusCode::NOT_FOUND, "Not found\n");
+    };
+    respond(
+        StatusCode::OK,
+        content_type(&name),
+        "public, max-age=31536000, immutable",
+        body,
+    )
+}
+
+fn content_type(filename: &str) -> &'static str {
+    match Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        _ => "application/octet-stream",
     }
 }
 
@@ -181,17 +226,7 @@ async fn static_file(app: Shared, filename: &'static str) -> Response {
     let Ok(body) = tokio::fs::read(app.config.static_dir.join(filename)).await else {
         return text(StatusCode::NOT_FOUND, "Not found\n");
     };
-    let content_type = match Path::new(filename)
-        .extension()
-        .and_then(|value| value.to_str())
-    {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-    respond(StatusCode::OK, content_type, "no-cache", body)
+    respond(StatusCode::OK, content_type(filename), "no-cache", body)
 }
 
 /// Container health probe (`yard-web --healthcheck`); needs no runtime.

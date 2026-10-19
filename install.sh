@@ -37,7 +37,7 @@ fi
 "${SUDO[@]}" install -d -o root -g root -m 755 /usr/local/share/yard
 "${SUDO[@]}" rm -rf /usr/local/share/yard/web-src
 "${SUDO[@]}" cp -R "$ROOT_DIR/web" /usr/local/share/yard/web-src
-"${SUDO[@]}" rm -rf /usr/local/share/yard/web-src/target /usr/local/share/yard/web-src/ui/node_modules
+"${SUDO[@]}" rm -rf /usr/local/share/yard/web-src/target /usr/local/share/yard/web-src/ui/node_modules /usr/local/share/yard/web-src/ui/dist
 "${SUDO[@]}" chown -R root:root /usr/local/share/yard/web-src
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type d -exec chmod 0755 {} +
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type f -exec chmod 0644 {} +
