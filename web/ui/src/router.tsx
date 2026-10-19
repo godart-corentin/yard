@@ -7,6 +7,8 @@ import {
 } from "@tanstack/react-router";
 
 import { Placeholder } from "./components/Placeholder";
+import { HostPage } from "./host/HostPage";
+import { ImagesPage } from "./images/ImagesPage";
 import { OverviewPage } from "./overview/OverviewPage";
 import { AppShell } from "./shell/AppShell";
 
@@ -55,13 +57,13 @@ const jobRoute = createRoute({
 const imagesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/images",
-  component: () => <Placeholder title="Images" />,
+  component: ImagesPage,
 });
 
 const hostRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/host",
-  component: () => <Placeholder title="Host" />,
+  component: HostPage,
 });
 
 export const routeTree = rootRoute.addChildren([
