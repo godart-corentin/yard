@@ -9,8 +9,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,6 +72,8 @@ pub struct Config {
     /// Delay between SIGTERM and SIGKILL of a timed out job.
     pub kill_grace: Duration,
     pub output_cap: u64,
+    /// How long to wait for the output pipe to close once the job's process group is gone.
+    pub pump_grace: Duration,
     pub refresh: Duration,
 }
 
@@ -109,6 +111,7 @@ impl Config {
             timeouts: Timeouts::default(),
             kill_grace: Duration::from_secs(10),
             output_cap: 16 * 1024 * 1024,
+            pump_grace: Duration::from_secs(5),
             refresh: Duration::from_secs(1),
         }
     }
@@ -265,7 +268,7 @@ fn killpg(pgid: i32, signal: i32) {
 }
 
 /// Copy the merged output to the log, capped. Always drains the pipe so the job never blocks.
-fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64) {
+fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64, abandoned: &AtomicBool) {
     let mut buffer = [0_u8; 8192];
     let mut total = 0_u64;
     let mut finished_writing = false;
@@ -276,6 +279,9 @@ fn pump(mut pipe: File, mut log: File, cap: u64, written: &AtomicU64) {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         };
+        if abandoned.load(Ordering::Relaxed) {
+            break;
+        }
         if finished_writing {
             continue;
         }
@@ -607,7 +613,14 @@ impl Executor {
         let written = Arc::new(AtomicU64::new(0));
         let pump_written = written.clone();
         let cap = self.config.output_cap;
-        let pump = thread::spawn(move || pump(pipe, log, cap, &pump_written));
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let pump_abandoned = abandoned.clone();
+        let mut note = log.try_clone().ok();
+        let (pumped, pump_done) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            pump(pipe, log, cap, &pump_written, &pump_abandoned);
+            let _ = pumped.send(());
+        });
         let timeout = self.config.timeouts.of(job.action);
         let started = Instant::now();
         let mut refreshed = (Instant::now(), 0_u64);
@@ -644,7 +657,20 @@ impl Executor {
         };
         // Whatever the job left behind must not outlive it, nor keep the pipe open.
         killpg(pgid, libc::SIGKILL);
-        let _ = pump.join();
+        // A descendant that called setsid() escapes the group kill and can hold the pipe open
+        // forever; waiting for EOF without a bound would keep the job running and its lock held.
+        if pump_done.recv_timeout(self.config.pump_grace).is_err() {
+            abandoned.store(true, Ordering::Relaxed);
+            if let Some(log) = note.as_mut() {
+                let _ = log.write_all(
+                    b"\n[output closed: a leftover process kept the output pipe open]\n",
+                );
+            }
+            eprintln!(
+                "yard ops executor: job {} left a process holding its output pipe",
+                job.id
+            );
+        }
         let (state, code, error) = match status {
             _ if timed_out => (
                 State::Failed,
@@ -756,7 +782,7 @@ mod tests {
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(root.join("projects")).unwrap();
             fs::create_dir_all(root.join("state")).unwrap();
-            for project in ["ok", "fail", "slow", "stubborn", "big", "other"] {
+            for project in ["ok", "fail", "slow", "stubborn", "big", "other", "leaky"] {
                 fs::write(
                     root.join(format!("projects/{project}.toml")),
                     format!(
@@ -803,6 +829,11 @@ mod tests {
             );
             script("p-big", "yes x | head -c 100000\n");
             script("p-other", "sleep 0.5\n");
+            // A setsid descendant escapes the group kill and keeps the output pipe open.
+            script(
+                "p-leaky",
+                "echo before\nsetsid sleep 20 &\necho $! > \"$(dirname \"$0\")/leaky.pid\"\n",
+            );
             let mut config = Config::production(&root.join("projects"), &root.join("state"));
             config.program = program;
             config.env = vec![("PATH".into(), std::env::var_os("PATH").unwrap())];
@@ -1068,6 +1099,31 @@ mod tests {
         let again = f.start(json!({"action": "backup", "project": "stubborn"}));
         assert_eq!(again["ok"], true);
         f.wait(&Fixture::id(&again));
+    }
+
+    #[test]
+    fn a_setsid_descendant_holding_the_pipe_does_not_pin_the_job_or_its_lock() {
+        let f = Fixture::new("leaky", |config| {
+            config.pump_grace = Duration::from_millis(300);
+        });
+        let started = Instant::now();
+        let id = Fixture::id(&f.start(json!({"action": "backup", "project": "leaky"})));
+        let job = f.wait(&id);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(job.state, State::Succeeded);
+        let log = f.log(&id);
+        assert!(log.starts_with("before\n"), "{log}");
+        assert!(log.contains("[output closed: a leftover process"), "{log}");
+        assert_eq!(job.output_bytes, log.len() as u64);
+        // The project lock was released although the descendant still lives.
+        let again = f.start(json!({"action": "backup", "project": "leaky"}));
+        assert_eq!(again["ok"], true, "{again}");
+        f.wait(&Fixture::id(&again));
+        if let Ok(pid) = fs::read_to_string(f.root.join("leaky.pid")) {
+            if let Ok(pid) = pid.trim().parse::<i32>() {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
     }
 
     #[test]

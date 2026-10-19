@@ -225,6 +225,11 @@ The executor trusts nothing from the request beyond what the allowlist accepts:
   (`[A-Za-z0-9._@-]{1,64}`) and recorded. The socket's file permissions are the real authorization.
 - Each job runs in its own process group with a wall-clock timeout (deploy 30 min, restore 30 min,
   backup 60 min, images-prune 10 min, host-collect 2 min); on timeout the group gets `SIGTERM`, then `SIGKILL` after 10 s, and the job is `failed`.
+- When the job's process exits the executor kills its process group, then waits at most 5 s for the output
+  pipe to close. A descendant that escaped with `setsid` and still holds the pipe cannot pin the job: the
+  executor appends `[output closed: a leftover process kept the output pipe open]` to the log, stops
+  collecting output, finalizes the job from the exit status of the main process and releases the lock. The
+  leftover process itself is not killed (it left the group); it is the project's own command that spawned it.
 - The output is capped at 16 MiB. After that the executor appends `[output truncated]` once and
   discards the rest (the job keeps running). Stdout and stderr are interleaved into one stream.
 
