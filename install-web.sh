@@ -324,6 +324,7 @@ wait_read_socket /run/yard-web-read/read.sock
 
 # The ops executor runs Docker, Git and backup commands; Web only gets its group-protected socket.
 install -o root -g root -m 0644 "${OPS_SOURCE}/yard-web-ops.service" /etc/systemd/system/yard-web-ops.service
+prepare_ops_jobs_dir /var/lib/yard || die "cannot prepare /var/lib/yard/jobs"
 start_ops_service
 wait_ops_socket /run/yard-web-ops/ops.sock
 

@@ -235,7 +235,12 @@ The executor trusts nothing from the request beyond what the allowlist accepts:
 
 ### Job storage
 
-Under `/var/lib/yard/jobs/` (created `0755`, files `0644` so the existing read-only state mount works):
+Under `/var/lib/yard/jobs/` (owned by `root:yard-web-ops`, mode `2750` (setgid, so new files inherit the group);
+files `0640`). The Web container reaches them through its read-only `/var/lib/yard` mount and the
+`yard-web-ops` gid that `install-web.sh` adds with `group_add` (it also needs the gid of `/var/lib/yard` itself to
+traverse it); other local users get nothing. The executor applies this layout when it starts (including to files of
+an older `0644` install) because the unit runs with `Group=yard-web-ops`, and `install-web.sh` prepares the
+directory before starting the unit:
 
 - `<id>.json`: the `Job` object plus `"v": 1`. Written **atomically** (temp file in the same directory, `fsync`, `rename`),
   at acceptance, at spawn, and at completion. `output_bytes` is refreshed with the same atomic write (at most
@@ -243,14 +248,26 @@ Under `/var/lib/yard/jobs/` (created `0755`, files `0644` so the existing read-o
 - `<id>.log`: append-only raw output, created before the process is spawned. Never rewritten or truncated.
   Its size is the source of truth for offsets; `output_bytes` in the JSON may lag while running.
 
-Crash safety: the executor writes the process group of a live job to `<id>.pid` (removed at completion).
+Crash safety: the executor writes the process group of a live job to `<id>.pid` (removed at completion) as
+`<pgid> <start time of the leader> <boot id>` (`/proc/<pgid>/stat` field 22 and
+`/proc/sys/kernel/random/boot_id`). After a reboot the boot id differs, and within a boot a recycled pid has another
+start time; either way the file is stale, the group is not adopted and the job is failed rather than locking its
+project forever. (A bare-number file written by an older executor is still accepted on existence alone.)
 When `ops-server` starts, every job still `running`/`queued` whose process group is gone is
 marked `failed` (`error: "Executor restarted"`), with `finished_at_unix` set. A group that is somehow still alive
 is adopted: it keeps its lock and the job is failed once the group disappears. Locks are in-memory only, derived
 from the live set after that sweep. Ids are never reused; `<id>.pid` is not meant to be read by Web.
 
 Retention: terminal jobs older than 90 days (by `finished_at_unix`) are deleted (`.json` and `.log`) at
-executor start and daily. Running jobs are never deleted.
+executor start and daily. Running jobs are never deleted. A job that cannot be deleted is logged and skipped; the
+pass continues with the others.
+
+Storage cap: after the age pass, at executor start, daily and each time a job ends, the oldest finished jobs are
+deleted until the history holds at most `YARD_JOBS_MAX_COUNT` jobs (default 500) and `YARD_JOBS_MAX_BYTES` bytes of
+`.json` plus `.log` (default 536870912, 512 MiB). `0` disables a cap; an unparsable value keeps the default.
+Queued and running jobs are never deleted, even if they alone exceed a cap. The variables are set in
+`yard-web-ops.service` and can be overridden with a drop-in (`systemctl edit yard-web-ops`); they are not passed to
+jobs. Keep `YARD_JOBS_MAX_BYTES` above the 16 MiB output cap, or a single large job can be pruned as soon as it ends.
 
 ### How Web reads jobs and output
 

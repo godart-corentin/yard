@@ -113,9 +113,10 @@ yard-web     read-only mounts, no Docker socket, unprivileged, read-only root fi
   accepts a closed set of actions and builds each command line from a fixed template, so the request
   cannot choose a command or free-form arguments. See "Security" for its privileges.
 - **Job storage**: the ops executor writes `/var/lib/yard/jobs/<id>.json` (state, atomically replaced)
-  and `<id>.log` (append-only output, capped at 16 MiB) and removes terminal jobs after 90 days. Web
-  reads these files through the state mount it already has, so job history and output stay readable
-  while the executor is down. Web never writes there.
+  and `<id>.log` (append-only output, capped at 16 MiB), removes terminal jobs after 90 days and keeps the
+  history under a cap (500 jobs and 512 MiB by default, oldest finished jobs first). Web reads these files
+  through the state mount it already has, so job history and output stay readable while the executor is
+  down. Web never writes there.
 
 Each executor socket is a separate directory with its own group (`yard-web-read`, `yard-web-ops`);
 the Web container user joins both groups, and nothing else on the host does by default.
@@ -293,9 +294,10 @@ reading status. Concretely:
   when the job ends. Output is capped at 16 MiB. At most 32 job output streams and 4 live log streams are open
   at once (1 or 2 hours each). Stopping the executor ends running jobs.
 - **Job output is visible and stored in clear.** `deploy`, `backup` and `restore` print whatever the CLI and the
-  commands it runs print, and `/var/lib/yard/jobs/*.log` is mode 0644 in a 0755 directory so that the read-only
-  state mount works. Every authenticated user, the `yard-web` container, and every local user on the host
-  can read it for 90 days. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
+  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 2750 with files 0640, so that the read-only
+  state mount works through the container's `yard-web-ops` supplementary group (`group_add` in the Compose file)
+  and other local users cannot read it. Every authenticated user, the `yard-web` container, root and members of
+  `yard-web-ops` can read it, for 90 days at most. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
   redact output.
 
 ## Hardening checklist

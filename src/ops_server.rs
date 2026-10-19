@@ -28,6 +28,20 @@ const MAX_REQUEST: u64 = 4096;
 const MAX_CONNECTIONS: usize = 32;
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+const JOBS_MAX_COUNT: &str = "YARD_JOBS_MAX_COUNT";
+const JOBS_MAX_BYTES: &str = "YARD_JOBS_MAX_BYTES";
+
+/// `YARD_JOBS_MAX_COUNT` / `YARD_JOBS_MAX_BYTES` from the unit; `0` disables a cap and an
+/// unparsable value keeps the default.
+fn limits_from_env() -> jobs::Limits {
+    let defaults = jobs::Limits::default();
+    let number = |name: &str| std::env::var(name).ok()?.trim().parse::<u64>().ok();
+    jobs::Limits {
+        max_jobs: number(JOBS_MAX_COUNT).map_or(defaults.max_jobs, |value| value as usize),
+        max_bytes: number(JOBS_MAX_BYTES).unwrap_or(defaults.max_bytes),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Timeouts {
     pub deploy: Duration,
@@ -72,6 +86,8 @@ pub struct Config {
     /// Delay between SIGTERM and SIGKILL of a timed out job.
     pub kill_grace: Duration,
     pub output_cap: u64,
+    /// Caps on the stored job history (oldest finished jobs are pruned first).
+    pub limits: jobs::Limits,
     /// How long to wait for the output pipe to close once the job's process group is gone.
     pub pump_grace: Duration,
     pub refresh: Duration,
@@ -95,6 +111,8 @@ impl Config {
             if key.to_str().is_some_and(|key| key.starts_with("YARD_"))
                 && key != "YARD_PROJECTS_DIR"
                 && key != "YARD_STATE_DIR"
+                && key != JOBS_MAX_COUNT
+                && key != JOBS_MAX_BYTES
             {
                 env.push((key, value));
             }
@@ -111,6 +129,7 @@ impl Config {
             timeouts: Timeouts::default(),
             kill_grace: Duration::from_secs(10),
             output_cap: 16 * 1024 * 1024,
+            limits: limits_from_env(),
             pump_grace: Duration::from_secs(5),
             refresh: Duration::from_secs(1),
         }
@@ -193,6 +212,8 @@ pub struct Executor {
     config: Config,
     jobs_dir: PathBuf,
     locks: Mutex<Locks>,
+    /// Serializes cleanup passes (start, daily, after each job).
+    cleanup: Mutex<()>,
 }
 
 struct Valid {
@@ -312,6 +333,7 @@ impl Executor {
             config,
             jobs_dir,
             locks: Mutex::new(Locks::default()),
+            cleanup: Mutex::new(()),
         });
         executor.retain();
         for unfinished in alive {
@@ -322,9 +344,19 @@ impl Executor {
         Ok(executor)
     }
 
+    /// Age retention, then the storage caps. Failures are reported and never stop the pass.
     pub fn retain(&self) {
-        if let Err(error) = jobs::retain(&self.jobs_dir, jobs::now_unix(), jobs::RETENTION) {
+        let _serial = self.cleanup.lock();
+        let aged = jobs::retain(&self.jobs_dir, jobs::now_unix(), jobs::RETENTION);
+        let capped = jobs::enforce_limits(&self.jobs_dir, self.config.limits);
+        for error in aged.errors.iter().chain(&capped.errors) {
             eprintln!("yard ops executor retention error: {error}");
+        }
+        if aged.removed + capped.removed > 0 {
+            eprintln!(
+                "yard ops executor retention: removed {} job(s) by age, {} by storage cap",
+                aged.removed, capped.removed
+            );
         }
     }
 
@@ -710,6 +742,8 @@ impl Executor {
             eprintln!("yard ops executor cannot persist job {}: {error}", job.id);
         }
         jobs::remove_pid(&self.jobs_dir, &job.id);
+        // The history only grows when a job ends, so this is when the caps are enforced.
+        self.retain();
     }
 }
 
@@ -767,7 +801,7 @@ pub fn serve(socket: &Path, projects: &Path, state: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     struct Fixture {
         root: PathBuf,
@@ -906,14 +940,13 @@ mod tests {
             jobs::json_path(&f.jobs(), &id),
             jobs::log_path(&f.jobs(), &id),
         ] {
-            assert_eq!(
-                fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o644
-            );
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+            assert_eq!(metadata.gid(), fs::metadata(f.jobs()).unwrap().gid());
         }
         assert_eq!(
-            fs::metadata(f.jobs()).unwrap().permissions().mode() & 0o777,
-            0o755
+            fs::metadata(f.jobs()).unwrap().permissions().mode() & 0o7777,
+            0o2750
         );
         assert!(!jobs::pid_path(&f.jobs(), &id).exists());
     }
@@ -1058,7 +1091,9 @@ mod tests {
         // Kill the slow job's group so the fixture does not leave a sleeper behind.
         let pgid: i32 = fs::read_to_string(jobs::pid_path(&f.jobs(), &slow))
             .unwrap()
-            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap()
             .parse()
             .unwrap();
         killpg(pgid, libc::SIGKILL);
@@ -1178,9 +1213,35 @@ mod tests {
         let pgid: i32 =
             fs::read_to_string(jobs::pid_path(&dir, reply["job"]["id"].as_str().unwrap()))
                 .unwrap()
-                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap()
                 .parse()
                 .unwrap();
         killpg(pgid, libc::SIGKILL);
+    }
+
+    #[test]
+    fn finished_jobs_beyond_the_count_cap_are_pruned() {
+        let f = Fixture::new("cap-count", |config| {
+            config.limits = jobs::Limits {
+                max_jobs: 2,
+                max_bytes: 0,
+            };
+        });
+        let mut last = String::new();
+        for _ in 0..4 {
+            last = Fixture::id(&f.start(json!({"action": "backup", "project": "ok"})));
+            f.wait(&last);
+            // The pass runs right after the job is persisted as finished.
+            thread::sleep(Duration::from_millis(300));
+        }
+        let kept = fs::read_dir(f.jobs())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+            .count();
+        assert_eq!(kept, 2);
+        assert!(jobs::json_path(&f.jobs(), &last).exists());
     }
 }

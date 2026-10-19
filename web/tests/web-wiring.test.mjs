@@ -75,3 +75,18 @@ test('update and uninstall handle the token file and the ops unit', () => {
   assert.ok(uninstall.indexOf('compose -f "$YARD_COMPOSE" down') < uninstall.indexOf('web.env"'))
   assert.match(uninstall, /yard-web-ops\.service/)
 })
+
+test('job history is group-readable by the container group only, and capped', () => {
+  const ops = read('ops/install-ops.sh')
+  const unit = read('ops/yard-web-ops.service')
+  // The installer prepares the directory for the same group it adds to the container.
+  assert.match(ops, /install -d -o root -g yard-web-ops -m 2750 "\$jobs"/)
+  assert.match(ops, /-exec chmod 0640/)
+  assert.match(installer, /prepare_ops_jobs_dir \/var\/lib\/yard/)
+  assert.ok(installer.indexOf('prepare_ops_jobs_dir') < installer.indexOf('start_ops_service\n'))
+  assert.match(installer, /group_add:[\s\S]*?"\$\{OPS_GROUP_GID\}"/)
+  assert.match(ops, /getent group yard-web-ops/)
+  assert.match(unit, /^Group=yard-web-ops$/m)
+  assert.match(unit, /^Environment=YARD_JOBS_MAX_COUNT=\d+$/m)
+  assert.match(unit, /^Environment=YARD_JOBS_MAX_BYTES=\d+$/m)
+})
