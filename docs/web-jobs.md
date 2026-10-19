@@ -155,7 +155,11 @@ can be replayed the same way for as long as the job is retained.
   means the server time limit was reached; clients may reconnect with `since`.
 - `project` required; `service` must be a configured service; `tail` 1-1000 (default 200);
   `since` has the same character restrictions as `/api/read?op=logs`. Violations are `400`
-  before the stream starts.
+  before the stream starts. Web also reads the executor's first frame (up to 1.5 s) before
+  answering `200`: an initial `{"error":...}` line becomes `400` (refused), `429` (executor
+  over its 4-stream limit) or `503` (anything else, or the executor closing without a frame) with
+  the usual `ApiError` JSON. A first frame that is slow to arrive does not delay the stream: the
+  SSE starts anyway.
 - Limits: at most 4 concurrent streams per Web instance, 1 hour per stream.
 
 ## Web <-> host executor
@@ -269,7 +273,7 @@ validated exactly like `logs`. The reply is a stream of JSON lines `{"line":"...
 terminated by `{"end":"closed"|"error"}`. The executor spawns `yard logs <project> --follow ...`, and kills its whole process group when the peer
 closes the connection or after 1 hour (`{"end":"closed"}`; the command ending by itself is `{"end":"error"}`). At most 4
 concurrent follow streams on the reader; a request over the limit, like any refused request, gets a single
-`{"error":"..."}` line instead of frames (Web maps it to 503/400 before starting its SSE). Web converts frames 1:1
+`{"error":"..."}` line instead of frames (Web reads it before starting its SSE: refused -> 400, over the limit -> 429, otherwise 503). Web converts frames 1:1
 into SSE events.
 
 ## Regenerating the TypeScript types
