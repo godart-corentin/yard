@@ -32,6 +32,7 @@ pub enum JobState {
 /// `POST /api/jobs` body.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields)]
 #[ts(export, export_to = "../ui/src/api/types/")]
 pub struct CreateJobRequest {
     pub action: JobAction,
@@ -74,6 +75,7 @@ pub struct Job {
 /// `GET /api/jobs` query string (all optional).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields)]
 #[ts(export, export_to = "../ui/src/api/types/")]
 pub struct ListJobsQuery {
     pub project: Option<String>,
@@ -96,6 +98,7 @@ pub struct JobList {
 /// `GET /api/jobs/{id}/output` query string. `Last-Event-ID` takes precedence.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields)]
 #[ts(export, export_to = "../ui/src/api/types/")]
 pub struct JobOutputQuery {
     /// Byte offset to resume from (default 0).
@@ -118,6 +121,7 @@ pub struct OutputChunk {
 /// `GET /api/logs/stream` query string.
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields)]
 #[ts(export, export_to = "../ui/src/api/types/")]
 pub struct LogsStreamQuery {
     pub project: String,
@@ -133,6 +137,14 @@ pub struct LogsStreamQuery {
 #[ts(export, export_to = "../ui/src/api/types/")]
 pub struct LogLine {
     pub text: String,
+}
+
+/// Payload of the final SSE `end` event of a logs stream.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../ui/src/api/types/")]
+pub struct LogEnd {
+    /// `"closed"` (server time limit or container stopped) or `"error"`.
+    pub reason: String,
 }
 
 /// Machine-readable error body for every non-2xx job/log response.

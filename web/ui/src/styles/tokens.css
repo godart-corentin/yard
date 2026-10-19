@@ -1,0 +1,79 @@
+/* Design tokens from the approved Yard mockup. Components use only these. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --color-bg: #0b0d10;
+  --color-panel: #111418;
+  --color-sidebar: #0e1115;
+  --color-raised: #141920;
+  --color-raised-hover: #1a2029;
+  --color-nav-hover: #151920;
+  --color-nav-active: #1a1f27;
+  --color-input: #11151a;
+
+  /* Borders */
+  --color-border: #1d2229;
+  --color-border-input: #232933;
+  --color-border-control: #2a313b;
+  --color-border-control-hover: #3a434f;
+
+  /* Text */
+  --color-text: #e6e9ee;
+  --color-text-strong: #ffffff;
+  --color-text-nav: #a8b1bc;
+  --color-text-chip: #c3cad3;
+  --color-muted: #98a2ae;
+  --color-faint: #7d8794;
+
+  /* Brand */
+  --color-brand: #3ddc84;
+  --color-on-brand: #06140b;
+
+  /* Status: badge background / badge text / dot */
+  --status-ok-bg: #0f2a1c;
+  --status-ok-fg: #6ee7a8;
+  --status-ok-dot: #34d399;
+  --status-warn-bg: #2d2410;
+  --status-warn-fg: #fcd34d;
+  --status-warn-dot: #fbbf24;
+  --status-bad-bg: #33141b;
+  --status-bad-fg: #fda4af;
+  --status-bad-dot: #fb7185;
+  --status-unk-bg: #1b2027;
+  --status-unk-fg: #aab3be;
+  --status-unk-dot: #6b7480;
+  --status-run-bg: #10223a;
+  --status-run-fg: #93c5fd;
+  --status-run-dot: #60a5fa;
+
+  /* Typography */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 14px;
+  --text-lg: 15px;
+  --text-xl: 24px;
+  --text-stat: 26px;
+  --leading-base: 1.5;
+
+  /* Radii */
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Layout */
+  --sidebar-width: 220px;
+  --content-max: 1120px;
+  --control-height: 36px;
+}
