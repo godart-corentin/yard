@@ -1,6 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Fragment } from "react";
 
+import { CommandPalette } from "../palette/CommandPalette";
 import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { useStatus } from "../api/queries";
@@ -52,12 +53,7 @@ export function Topbar() {
     <header className={styles.top}>
       <Breadcrumbs />
       <div className={styles.tools}>
-        {/* The command palette arrives in a later task; the button is inert until then. */}
-        <button type="button" className={styles.search}>
-          <Icon name="search" size={15} />
-          Search or run a command…
-          <span className={styles.kbd}>⌘K</span>
-        </button>
+        <CommandPalette />
         <RefreshButton />
       </div>
     </header>

@@ -193,3 +193,17 @@ export function PruneDialog(dialog: DialogProps) {
     </JobDialog>
   );
 }
+
+export function HostCollectDialog(dialog: DialogProps) {
+  return (
+    <JobDialog
+      {...dialog}
+      kicker="yard host"
+      title="Collect host metrics?"
+      confirmLabel="Collect"
+      request={{ action: "host-collect" }}
+    >
+      <p className={styles.note}>Takes a host snapshot now. It is quick and changes nothing on the host.</p>
+    </JobDialog>
+  );
+}
