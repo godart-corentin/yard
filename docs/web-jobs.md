@@ -238,7 +238,7 @@ The executor trusts nothing from the request beyond what the allowlist accepts:
 
 ### Job storage
 
-Under `/var/lib/yard/jobs/` (owned by `root:yard-web-ops`, mode `2750` (setgid, so new files inherit the group);
+Under `/var/lib/yard/jobs/` (owned by `root:yard-web-ops`, mode `0750`; the executor runs with that group, so new files get it without a setgid bit, which the unit's `RestrictSUIDSGID=yes` would refuse;
 files `0640`). The Web container reaches them through its read-only `/var/lib/yard` mount and the
 `yard-web-ops` gid that `install-web.sh` adds with `group_add` (it also needs the gid of `/var/lib/yard` itself to
 traverse it); other local users get nothing. The executor applies this layout when it starts (including to files of

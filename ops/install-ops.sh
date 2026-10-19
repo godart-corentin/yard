@@ -24,7 +24,7 @@ ops_group_gid() {
 prepare_ops_jobs_dir() {
   local state="${1:-/var/lib/yard}" jobs
   jobs="${state}/jobs"
-  install -d -o root -g yard-web-ops -m 2750 "$jobs" || return 1
+  install -d -o root -g yard-web-ops -m 0750 "$jobs" || return 1
   find "$jobs" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' \) \
     -exec chgrp yard-web-ops {} + -exec chmod 0640 {} + || return 1
 }

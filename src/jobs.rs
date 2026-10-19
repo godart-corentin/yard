@@ -4,7 +4,7 @@
 //! supervisor of the job; `<id>.pid` (executor private) records the process group of a live job
 //! so a restarted executor can tell a vanished job from one that is still running.
 //!
-//! The directory is `root:<executor group>` `2750` and the files `0640`: only the executor and
+//! The directory is `root:<executor group>` `0750` and the files `0640`: only the executor and
 //! the group of the Web container (which mounts the state read-only) can read job output.
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
@@ -87,8 +87,9 @@ pub fn jobs_dir(state: &Path) -> PathBuf {
 
 /// Files readable by the owner and the group of the executor (the Web container's group).
 const FILE_MODE: u32 = 0o640;
-/// Setgid, so every file created below inherits the directory's group.
-const DIR_MODE: u32 = 0o2750;
+/// No setgid bit: the unit's `RestrictSUIDSGID=yes` forbids setting it (EPERM), and the executor
+/// already runs with the group as its effective gid, so new files get it anyway.
+const DIR_MODE: u32 = 0o750;
 
 fn egid() -> u32 {
     unsafe { libc::getegid() }
@@ -102,14 +103,16 @@ fn chgrp(path: &Path, gid: u32) -> io::Result<()> {
     std::os::unix::fs::lchown(path, None, Some(gid))
 }
 
-/// Create the directory `2750` with the executor's group whatever the umask, and bring files of
+/// Create the directory `0750` with the executor's group whatever the umask, and bring files of
 /// an older layout (`0644`, group root) to `0640` in that group. The read-only state mount of the
 /// Web container reaches the files through its supplementary group, never as "other".
 pub fn ensure_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     let gid = egid();
     chgrp(dir, gid)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(DIR_MODE))?;
+    if fs::metadata(dir)?.permissions().mode() & 0o7777 != DIR_MODE {
+        fs::set_permissions(dir, fs::Permissions::from_mode(DIR_MODE))?;
+    }
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         let public = path
@@ -484,7 +487,7 @@ mod tests {
         assert_eq!(log.metadata().unwrap().permissions().mode() & 0o777, 0o640);
         assert_eq!(
             fs::metadata(&dir).unwrap().permissions().mode() & 0o7777,
-            0o2750
+            0o750
         );
         let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["v"], 1);

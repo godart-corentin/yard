@@ -954,7 +954,7 @@ mod tests {
         }
         assert_eq!(
             fs::metadata(f.jobs()).unwrap().permissions().mode() & 0o7777,
-            0o2750
+            0o750
         );
         assert!(!jobs::pid_path(&f.jobs(), &id).exists());
     }
