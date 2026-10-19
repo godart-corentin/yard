@@ -24,16 +24,15 @@ const FILTERS: { label: string; state: JobState | undefined }[] = [
 /** Strips the date part of an id (`20261019T142501Z-3fa9c01b`), keeping the random suffix. */
 const shortId = (id: string) => id.split("-").pop() ?? id;
 
-export function ActivityPage() {
+/** Filterable job table; `project` limits it to one project (and hides the Project column). */
+export function ActivityList({ project }: { project?: string }) {
   const [filter, setFilter] = useState<JobState | undefined>(undefined);
-  const jobs = useJobList(filter);
+  const jobs = useJobList(filter, project);
   const now = useNow(5000);
   const rows = jobs.data?.pages.flatMap((page) => page.jobs) ?? [];
 
   return (
     <>
-      <PageHeader title="Activity" subtitle="Every action started from Web, with its full output · kept 90 days" />
-
       <div className={styles.filters} role="group" aria-label="Filter by result">
         {FILTERS.map((item) => (
           <button
@@ -67,7 +66,7 @@ export function ActivityPage() {
                 <tr>
                   <Th>Job</Th>
                   <Th>Action</Th>
-                  <Th>Project</Th>
+                  {!project && <Th>Project</Th>}
                   <Th>By</Th>
                   <Th>Started</Th>
                   <Th>Duration</Th>
@@ -90,7 +89,7 @@ export function ActivityPage() {
                         <br />
                         <span className={`muted ${styles.small}`}>{detail || "—"}</span>
                       </Td>
-                      <Td>{job.project ?? "—"}</Td>
+                      {!project && <Td>{job.project ?? "—"}</Td>}
                       <Td className="muted">{job.actor}</Td>
                       <Td className="muted">{formatWhen(job.created_at_unix, now)}</Td>
                       <Td className="mono">{seconds != null ? formatDuration(seconds) : "—"}</Td>
@@ -117,6 +116,15 @@ export function ActivityPage() {
           </>
         )}
       </Card>
+    </>
+  );
+}
+
+export function ActivityPage() {
+  return (
+    <>
+      <PageHeader title="Activity" subtitle="Every action started from Web, with its full output · kept 90 days" />
+      <ActivityList />
     </>
   );
 }

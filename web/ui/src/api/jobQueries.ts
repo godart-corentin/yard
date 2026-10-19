@@ -32,11 +32,11 @@ export function useJob(id: string) {
   });
 }
 
-/** Paginated job list, newest first; `state` undefined means all. */
-export function useJobList(state: JobState | undefined) {
+/** Paginated job list, newest first; `state` undefined means all, `project` narrows to one project. */
+export function useJobList(state: JobState | undefined, project?: string) {
   return useInfiniteQuery({
-    queryKey: ["jobs", "list", state ?? "all"],
-    queryFn: ({ pageParam }) => api.listJobs({ state, limit: JOBS_PAGE_SIZE, cursor: pageParam }),
+    queryKey: ["jobs", "list", state ?? "all", project ?? "*"],
+    queryFn: ({ pageParam }) => api.listJobs({ state, project, limit: JOBS_PAGE_SIZE, cursor: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     refetchInterval: JOBS_REFRESH_MS * 2,

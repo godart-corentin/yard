@@ -6,9 +6,8 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 
-import { ActivityPage } from "./activity/ActivityPage";
+import { ActivityList, ActivityPage } from "./activity/ActivityPage";
 import { JobPage } from "./activity/JobPage";
-import { Placeholder } from "./components/Placeholder";
 import { HostPage } from "./host/HostPage";
 import { ImagesPage } from "./images/ImagesPage";
 import { LogsTab } from "./logs/LogsTab";
@@ -39,7 +38,7 @@ function ProjectPage() {
   return <ProjectLayout name={name} />;
 }
 
-function projectTab(path: "overview" | "releases" | "logs" | "activity", title: string) {
+function projectTab(path: "overview" | "releases" | "logs" | "activity") {
   return createRoute({
     getParentRoute: () => projectRoute,
     path,
@@ -48,7 +47,7 @@ function projectTab(path: "overview" | "releases" | "logs" | "activity", title: 
       if (path === "overview") return <OverviewTab name={name} />;
       if (path === "releases") return <ReleasesTab name={name} />;
       if (path === "logs") return <LogsTab project={name} />;
-      return <Placeholder title={name} subtitle={title} />;
+      return <ActivityList project={name} />;
     },
   });
 }
@@ -84,10 +83,10 @@ export const routeTree = rootRoute.addChildren([
   overviewRoute,
   projectRoute.addChildren([
     projectIndexRoute,
-    projectTab("overview", "Overview"),
-    projectTab("releases", "Releases & backups"),
-    projectTab("logs", "Logs"),
-    projectTab("activity", "Activity"),
+    projectTab("overview"),
+    projectTab("releases"),
+    projectTab("logs"),
+    projectTab("activity"),
   ]),
   activityRoute,
   jobRoute,
