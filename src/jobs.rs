@@ -4,7 +4,7 @@
 //! supervisor of the job; `<id>.pid` (executor private) records the process group of a live job
 //! so a restarted executor can tell a vanished job from one that is still running.
 //!
-//! The directory is `root:<executor group>` `0750` and the files `0640`: only the executor and
+//! The directory is `<deploy user>:<executor group>` `0750` and the files `0640`: only the executor and
 //! the group of the Web container (which mounts the state read-only) can read job output.
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};

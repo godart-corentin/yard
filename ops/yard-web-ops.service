@@ -1,14 +1,17 @@
 # Yard Web ops executor; runs allowlisted Yard CLI actions as jobs for Yard Web.
 #
+# It runs as the deploy user, the owner of /var/lib/yard, so a Web job does exactly what that user's
+# `yard` command does: Git accepts the repositories, Docker comes from the user's docker group, and
+# every file it writes (state, .git, .env, backups) keeps the owner the CLI expects. install-web.sh
+# fills in @DEPLOY_USER@ and @DEPLOY_GROUP@ (the user's primary group, which systemd does not add
+# by itself when Group= is set). Group=yard-web-ops owns the socket and the job history.
+#
 # Compared with yard-web-read.service this unit must deploy, back up and restore, so it
 # deliberately relaxes the read profile (everything else is kept):
 #   - PrivateNetwork removed: git fetch, image builds and backup commands use the network.
 #   - ProtectSystem=full instead of strict, ProtectHome removed: repositories, Compose
-#     directories, backup targets and the root user's git/docker credentials live outside
+#     directories, backup targets and the deploy user's git/docker credentials live outside
 #     /var/lib/yard, and project manifests choose them. /usr, /boot and /etc stay read-only.
-#   - A small capability set instead of none: a root process without CAP_DAC_OVERRIDE/FOWNER
-#     cannot work in repositories and backup directories owned by the deploy user.
-#   - Docker access comes from running as root (/var/run/docker.sock), as for the CLI itself.
 # NoNewPrivileges stays on, so jobs cannot gain privileges (sudo inside a backup command fails).
 [Unit]
 Description=Yard Web ops executor
@@ -17,8 +20,9 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=root
+User=@DEPLOY_USER@
 Group=yard-web-ops
+SupplementaryGroups=@DEPLOY_GROUP@
 UMask=0007
 RuntimeDirectory=yard-web-ops
 RuntimeDirectoryMode=0750
@@ -35,7 +39,7 @@ RestartSec=2
 KillMode=control-group
 TimeoutStopSec=30
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN
+CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=full
 PrivateTmp=yes

@@ -285,7 +285,7 @@ The installer:
 The installer also requires systemd and the updated Yard CLI. It starts two host-side services, each on a group-restricted Unix socket that the Web container only gets as a bind of the socket directory (the container still has no Docker socket):
 
 - `yard-web-read.service` (`yard read-server`): sandboxed, allowlisted, bounded reads (logs, restore points, image inventory). It runs as root with only `CAP_DAC_READ_SEARCH` (read, never write, the deploy user's state and Compose environment files) and network access for URL monitor checks.
-- `yard-web-ops.service` (`yard ops-server`): starts the job actions. It runs as root with **relaxed** hardening (network access, `ProtectSystem=full`, a few capabilities) because deployments, backups and restores cannot work without it. Web and the executor both reject everything outside the five allowlisted actions, and commands are built from fixed templates with no shell.
+- `yard-web-ops.service` (`yard ops-server`): starts the job actions. It runs as the deploy user that owns `/var/lib/yard` (the user who runs `yard` on the CLI, who must be in the `docker` group), with **relaxed** hardening (network access, `ProtectSystem=full`) because deployments, backups and restores cannot work without it. Web and the executor both reject everything outside the five allowlisted actions, and commands are built from fixed templates with no shell.
 
 Treat the Basic Auth credentials and the host executors as root-level operational access, and keep `/etc/yard/projects` writable by trusted administrators only.
 
@@ -404,7 +404,7 @@ Recommended practices:
 
 Yard executes configured backup commands directly, without a shell. This avoids shell expansion in manifest values, but project manifests are still privileged operational configuration and should only be writable by trusted administrators.
 
-Yard Web is designed to remain private behind Caddy Basic Auth. Its container runs unprivileged, publishes no host port, mounts Yard configuration and state read-only, uses a read-only root filesystem, drops Linux capabilities, and does not read application `.env` files. Actions started from Web run on the host through `yard-web-ops.service`, a root executor with relaxed hardening that only accepts the allowlisted deploy, backup, restore, image prune and host collection actions; any user with the Basic Auth password can start them, and job logs (`/var/lib/yard/jobs/*.log`, mode 0644) hold whatever those commands print. See [`docs/web.md`](docs/web.md#security).
+Yard Web is designed to remain private behind Caddy Basic Auth. Its container runs unprivileged, publishes no host port, mounts Yard configuration and state read-only, uses a read-only root filesystem, drops Linux capabilities, and does not read application `.env` files. Actions started from Web run on the host through `yard-web-ops.service`, an executor running as the deploy user with relaxed hardening that only accepts the allowlisted deploy, backup, restore, image prune and host collection actions; any user with the Basic Auth password can start them, and job logs (`/var/lib/yard/jobs/*.log`, mode 0640, readable by the Web container) hold whatever those commands print. See [`docs/web.md`](docs/web.md#security).
 
 ## Remove Yard Web
 

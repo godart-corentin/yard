@@ -177,12 +177,14 @@ by an explicit, auditable mount. Same conventions as the read service: a systemd
 `yard-web-ops.service`, `RuntimeDirectory=yard-web-ops` (mode 0750), dedicated group `yard-web-ops`
 that the Web container user joins, `UMask=0007`, `NoNewPrivileges`, and the hardening of `yard-web-read.service` **except** what a
 deploy cannot work without. Unlike the reader, the executor runs Docker, Git and project backup commands
-and writes `/var/lib/yard`, so it runs as root and relaxes: no `PrivateNetwork` (git, builds, backups
-use the network); `ProtectSystem=full` instead of `strict` and no `ProtectHome` (repositories, Compose
-directories, backup targets and root's git/docker credentials are chosen by project manifests and
-live anywhere; `/usr`, `/boot` and `/etc` stay read-only), so there is no `ReadWritePaths` list;
-the capability bounding set is `CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN` instead of empty
-(a root without them cannot work in directories owned by the deploy user); `RestrictAddressFamilies`
+and writes `/var/lib/yard`, so it runs as the deploy user (the owner of `/var/lib/yard`, never root:
+Git rejects repositories owned by another user, and root-written files would break the next CLI run),
+with `SupplementaryGroups=` its primary group and Docker through its `docker` membership; `install-web.sh`
+fills in `User=@DEPLOY_USER@` and `SupplementaryGroups=@DEPLOY_GROUP@`. It relaxes: no `PrivateNetwork`
+(git, builds, backups use the network); `ProtectSystem=full` instead of `strict` and no `ProtectHome`
+(repositories, Compose directories, backup targets and the user's git/docker credentials are chosen by
+project manifests and live anywhere; `/usr`, `/boot` and `/etc` stay read-only), so there is no
+`ReadWritePaths` list; the capability bounding set stays empty; `RestrictAddressFamilies`
 adds `AF_INET AF_INET6`. `NoNewPrivileges` stays, so `sudo` inside a backup command does not work.
 The unit and installer helpers live in `ops/` (not `web/`). Env: `YARD_WEB_OPS_SOCKET` in Web.
 
@@ -238,7 +240,7 @@ The executor trusts nothing from the request beyond what the allowlist accepts:
 
 ### Job storage
 
-Under `/var/lib/yard/jobs/` (owned by `root:yard-web-ops`, mode `0750`; the executor runs with that group, so new files get it without a setgid bit, which the unit's `RestrictSUIDSGID=yes` would refuse;
+Under `/var/lib/yard/jobs/` (owned by `<deploy user>:yard-web-ops`, mode `0750`; the executor runs with that group, so new files get it without a setgid bit, which the unit's `RestrictSUIDSGID=yes` would refuse;
 files `0640`). The Web container reaches them through its read-only `/var/lib/yard` mount and the
 `yard-web-ops` gid that `install-web.sh` adds with `group_add` (it also needs the gid of `/var/lib/yard` itself to
 traverse it); other local users get nothing. The executor applies this layout when it starts (including to files of

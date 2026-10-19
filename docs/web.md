@@ -270,12 +270,15 @@ reading status. Concretely:
 - **Authorization is Basic Auth alone, with no roles.** Every authenticated user may run every action, on every
   project. Give the password only to people you would give `sudo yard` to. There is no rate limit besides
   the per-project and global job locks.
-- **The ops executor is root and its hardening is relaxed** compared with the reader, because deploys cannot
-  work without it. It runs as root (Docker socket, Git, project backup commands, writes `/var/lib/yard`),
-  keeps network access (Git fetches, image builds, off-site backups), uses `ProtectSystem=full` instead of
-  `strict` with no `ProtectHome` (repositories, Compose directories and backup targets are wherever the
-  manifests say), and keeps four capabilities (`CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`,
-  `CAP_CHOWN`). `NoNewPrivileges`, namespace, syscall-architecture and kernel-protection restrictions remain.
+- **The ops executor runs as the deploy user and its hardening is relaxed** compared with the reader, because
+  deploys cannot work without it. It runs as the owner of `/var/lib/yard` (the user who runs `yard` on the
+  CLI), with that user's primary group and its `docker` membership, so a Web job has exactly that user's
+  rights: Git accepts the repositories and every file it writes keeps the owner the CLI expects. Docker access
+  makes it root-equivalent all the same. `install-web.sh` refuses a root-owned `/var/lib/yard` and a deploy
+  user outside the `docker` group. The unit keeps network access (Git fetches, image builds, off-site backups),
+  uses `ProtectSystem=full` instead of `strict` with no `ProtectHome` (repositories, Compose directories, backup
+  targets and the user's Git/Docker credentials are wherever the manifests say) and has no capabilities.
+  `NoNewPrivileges`, namespace, syscall-architecture and kernel-protection restrictions remain.
   Project manifests are privileged configuration (they name the commands that run): keep
   `/etc/yard/projects` writable by trusted administrators only, since Web will run what they say.
 - **What a request can choose is small.** The action (closed list), a project that exists in
@@ -299,9 +302,9 @@ reading status. Concretely:
   when the job ends. Output is capped at 16 MiB. At most 32 job output streams and 4 live log streams are open
   at once (1 or 2 hours each). Stopping the executor ends running jobs.
 - **Job output is visible and stored in clear.** `deploy`, `backup` and `restore` print whatever the CLI and the
-  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 0750 with files 0640, so that the read-only
+  commands it runs print, and `/var/lib/yard/jobs/` is `<deploy user>:yard-web-ops` mode 0750 with files 0640, so that the read-only
   state mount works through the container's `yard-web-ops` supplementary group (`group_add` in the Compose file)
-  and other local users cannot read it. Every authenticated user, the `yard-web` container, root and members of
+  and other local users cannot read it. Every authenticated user, the `yard-web` container, the deploy user, root and members of
   `yard-web-ops` can read it, for 90 days at most. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
   redact output.
 
