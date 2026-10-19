@@ -22,6 +22,8 @@ Group=yard-web-ops
 UMask=0007
 RuntimeDirectory=yard-web-ops
 RuntimeDirectoryMode=0750
+# Keep the directory (same inode) across restarts so the container bind mount stays valid.
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/yard ops-server --socket /run/yard-web-ops/ops.sock
 Restart=on-failure
 RestartSec=2

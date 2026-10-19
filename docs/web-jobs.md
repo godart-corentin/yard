@@ -1,15 +1,14 @@
 # Yard Web jobs contract
 
-Status: contract for the "Web runs every CLI action" effort. It is the single
-reference for three parallel pieces of work:
+Status: implemented; the contract of the "Web runs every CLI action" effort and the single
+reference for its three pieces:
 
 - **T1, host executor**: a new hidden `yard ops-server` subcommand and its systemd unit;
 - **T2, Web API**: the job and log endpoints in `web/server/`;
 - **T6, UI**: the React client in `web/ui/`.
 
-Nothing here is implemented yet except the Rust request/response types
-(`web/server/api_types.rs`) and their generated TypeScript twins. Where this
-document and the CLI disagree about the CLI, the CLI wins and this document gets fixed.
+Where this document and the CLI disagree about the CLI, the CLI wins and this document gets fixed.
+[web.md](web.md) describes the architecture, installation and security model.
 
 Auth is unchanged: Caddy Basic Auth in front of Yard Web. Everything below is
 private-network, single-tenant, no roles: any authenticated user may run any action.
