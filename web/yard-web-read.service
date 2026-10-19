@@ -1,4 +1,11 @@
 # Yard Web read-only executor; the only writable mount is its local socket directory.
+#
+# It runs the same checks as `yard status`, so it needs:
+#   - the network, to sample the health URLs of URL monitors (without it every monitor
+#     reads as down);
+#   - CAP_DAC_READ_SEARCH, to read state files and Compose .env files owned by the deploy
+#     user (mode 0600). It only bypasses read permission checks: nothing can be written
+#     outside the socket directory (ProtectSystem=strict, ProtectHome=read-only).
 [Unit]
 Description=Yard Web allowlisted host reader
 After=docker.service
@@ -17,15 +24,14 @@ ExecStart=/usr/local/bin/yard read-server --socket /run/yard-web-read/read.sock
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/run/yard-web-read
 PrivateTmp=yes
 PrivateDevices=yes
-PrivateNetwork=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

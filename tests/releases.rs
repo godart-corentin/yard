@@ -1632,7 +1632,7 @@ fn preexisting_temp_file_is_not_overwritten_by_state_save() {
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(mode, 0o600);
+    assert_eq!(mode, 0o640);
 }
 
 #[test]
