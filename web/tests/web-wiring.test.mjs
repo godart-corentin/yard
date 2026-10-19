@@ -85,7 +85,7 @@ test('job history is group-readable by the container group only, and capped', ()
   const ops = read('ops/install-ops.sh')
   const unit = read('ops/yard-web-ops.service')
   // The installer prepares the directory for the same group it adds to the container.
-  assert.match(ops, /install -d -o root -g yard-web-ops -m 2750 "\$jobs"/)
+  assert.match(ops, /install -d -o root -g yard-web-ops -m 0750 "\$jobs"/)
   assert.match(ops, /-exec chmod 0640/)
   assert.match(installer, /prepare_ops_jobs_dir \/var\/lib\/yard/)
   assert.ok(installer.indexOf('prepare_ops_jobs_dir') < installer.indexOf('start_ops_service\n'))

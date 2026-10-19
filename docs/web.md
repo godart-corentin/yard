@@ -297,7 +297,7 @@ reading status. Concretely:
   when the job ends. Output is capped at 16 MiB. At most 32 job output streams and 4 live log streams are open
   at once (1 or 2 hours each). Stopping the executor ends running jobs.
 - **Job output is visible and stored in clear.** `deploy`, `backup` and `restore` print whatever the CLI and the
-  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 2750 with files 0640, so that the read-only
+  commands it runs print, and `/var/lib/yard/jobs/` is `root:yard-web-ops` mode 0750 with files 0640, so that the read-only
   state mount works through the container's `yard-web-ops` supplementary group (`group_add` in the Compose file)
   and other local users cannot read it. Every authenticated user, the `yard-web` container, root and members of
   `yard-web-ops` can read it, for 90 days at most. If a build or backup command may print a secret, fix the command to stay quiet; Yard does not
