@@ -170,10 +170,16 @@ The ops socket is **separate** from the read socket so that the read service can
 strict profile (`PrivateNetwork`, no job state writes) and so that mutation rights are granted
 by an explicit, auditable mount. Same conventions as the read service: a systemd unit
 `yard-web-ops.service`, `RuntimeDirectory=yard-web-ops` (mode 0750), dedicated group `yard-web-ops`
-that the Web container user joins, `UMask=0007`, `NoNewPrivileges`, empty capability set, hardening
-equivalent to `yard-web-read.service`. Unlike the reader, it must be able to run Docker and write
-`/var/lib/yard`, so it runs as root and gets `ReadWritePaths=/var/lib/yard /run/yard-web-ops`, and no `PrivateNetwork` if
-deploys need the network (T1 decides, and documents any relaxation). Env: `YARD_WEB_OPS_SOCKET` in Web.
+that the Web container user joins, `UMask=0007`, `NoNewPrivileges`, and the hardening of `yard-web-read.service` **except** what a
+deploy cannot work without. Unlike the reader, the executor runs Docker, Git and project backup commands
+and writes `/var/lib/yard`, so it runs as root and relaxes: no `PrivateNetwork` (git, builds, backups
+use the network); `ProtectSystem=full` instead of `strict` and no `ProtectHome` (repositories, Compose
+directories, backup targets and root's git/docker credentials are chosen by project manifests and
+live anywhere; `/usr`, `/boot` and `/etc` stay read-only), so there is no `ReadWritePaths` list;
+the capability bounding set is `CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN` instead of empty
+(a root without them cannot work in directories owned by the deploy user); `RestrictAddressFamilies`
+adds `AF_INET AF_INET6`. `NoNewPrivileges` stays, so `sudo` inside a backup command does not work.
+The unit and installer helpers live in `ops/` (not `web/`). Env: `YARD_WEB_OPS_SOCKET` in Web.
 
 ### Wire protocol
 
@@ -202,10 +208,15 @@ else or a connection failure -> 503/500 as in the error table. `message` is for 
 The executor trusts nothing from the request beyond what the allowlist accepts:
 
 - `action` is a closed enum (table above); the argv is built from fixed templates, with `project`
-  validated like Web does **and** checked against `/etc/yard/projects` (full manifest, not a monitor),
-  `revision` checked against the project's recorded restore points. No shell, no env passthrough
-  (`env_clear` plus the minimal `PATH`/`HOME`/`YARD_*` that the CLI needs), stdin `/dev/null`.
-  The binary is the installed `yard` (`/usr/local/bin/yard`, resolved at start, not taken from the request).
+  validated like Web does **and** checked against `/etc/yard/projects` (full manifest, not a monitor;
+  `backup` also needs a configured backup command), `revision` checked against the project's recorded
+  restore points: the `current`, `previous` or `pending` release of its state file, by revision or as
+  `release:<tag>`. No shell, no env passthrough: `env_clear`, then `PATH` and `HOME` (inherited from the
+  executor, defaults `/usr/local/sbin:...:/bin` and `/root`), the `YARD_*` variables set on the executor unit
+  (thresholds) and `YARD_PROJECTS_DIR`/`YARD_STATE_DIR`; stdin `/dev/null`, working directory `/`, umask
+  `022` (the unit's `UMask=0007` only protects the socket).
+  The binary is the executor's own (`/proc/self/exe`, as in the read executor), not taken from the request:
+  jobs always run the same version as the executor, and `update.sh` restarts the unit.
 - `actor` is only an audit label supplied by the already-authenticated Web; it is re-validated
   (`[A-Za-z0-9._@-]{1,64}`) and recorded. The socket's file permissions are the real authorization.
 - Each job runs in its own process group with a wall-clock timeout (deploy 30 min, restore 30 min,
@@ -223,9 +234,11 @@ Under `/var/lib/yard/jobs/` (created `0755`, files `0644` so the existing read-o
 - `<id>.log`: append-only raw output, created before the process is spawned. Never rewritten or truncated.
   Its size is the source of truth for offsets; `output_bytes` in the JSON may lag while running.
 
-Crash safety: when `ops-server` starts, every job still `running`/`queued` whose process group is gone is
-marked `failed` (`error: "Executor restarted"`), with `finished_at_unix` set. Locks are in-memory only, derived
-from the live set after that sweep.
+Crash safety: the executor writes the process group of a live job to `<id>.pid` (removed at completion).
+When `ops-server` starts, every job still `running`/`queued` whose process group is gone is
+marked `failed` (`error: "Executor restarted"`), with `finished_at_unix` set. A group that is somehow still alive
+is adopted: it keeps its lock and the job is failed once the group disappears. Locks are in-memory only, derived
+from the live set after that sweep. Ids are never reused; `<id>.pid` is not meant to be read by Web.
 
 Retention: terminal jobs older than 90 days (by `finished_at_unix`) are deleted (`.json` and `.log`) at
 executor start and daily. Running jobs are never deleted.
@@ -253,8 +266,11 @@ history unreadable while the executor is down. Consequences:
 
 Live logs are a read, so they extend the **read** protocol (T1): `{"op":"logs-follow","project":...,"service":...,"since":...,"tail":...}`
 validated exactly like `logs`. The reply is a stream of JSON lines `{"line":"..."}` (each line truncated at 16 KiB),
-terminated by `{"end":"closed"|"error"}`. The executor spawns `yard logs <project> --follow ...`, and kills it when the peer
-closes the connection or after 1 hour. At most 4 concurrent follow streams on the reader. Web converts frames 1:1 into SSE events.
+terminated by `{"end":"closed"|"error"}`. The executor spawns `yard logs <project> --follow ...`, and kills its whole process group when the peer
+closes the connection or after 1 hour (`{"end":"closed"}`; the command ending by itself is `{"end":"error"}`). At most 4
+concurrent follow streams on the reader; a request over the limit, like any refused request, gets a single
+`{"error":"..."}` line instead of frames (Web maps it to 503/400 before starting its SSE). Web converts frames 1:1
+into SSE events.
 
 ## Regenerating the TypeScript types
 

@@ -25,6 +25,7 @@ command -v python3 >/dev/null || die "python3 not found"
 command -v systemctl >/dev/null || die "systemd is required for the local read executor"
 command -v yard >/dev/null || die "install the updated Yard CLI first"
 yard read-server --help >/dev/null 2>&1 || die "installed Yard CLI lacks the read-only executor; run install.sh first"
+yard ops-server --help >/dev/null 2>&1 || die "installed Yard CLI lacks the ops executor; run install.sh first"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin unavailable"
 
 # Prefer the source checkout when install-web.sh is run from the Yard repo.
@@ -38,6 +39,16 @@ else
   die "Yard Web source not found next to install-web.sh or in ${INSTALLED_WEB_SOURCE}"
 fi
 source "${WEB_SOURCE}/install-read.sh"
+
+# The ops executor files live beside the CLI sources, not in the Web image context.
+if [[ -f "${SOURCE_DIR}/ops/yard-web-ops.service" ]]; then
+  OPS_SOURCE="${SOURCE_DIR}/ops"
+elif [[ -f /usr/local/share/yard/ops-src/yard-web-ops.service ]]; then
+  OPS_SOURCE="/usr/local/share/yard/ops-src"
+else
+  die "ops executor files not found next to install-web.sh or in /usr/local/share/yard/ops-src"
+fi
+source "${OPS_SOURCE}/install-ops.sh"
 
 [[ -d /etc/yard/projects ]] || die "/etc/yard/projects does not exist; install Yard first"
 [[ -d /var/lib/yard ]] || die "/var/lib/yard does not exist; install Yard first"
@@ -101,6 +112,7 @@ echo "Yard Web will use Caddy network: ${PROXY_NETWORK}"
 
 STATE_GID="$(stat -c '%g' /var/lib/yard)"
 READ_GROUP_GID="$(read_group_gid)" || die "cannot provision dedicated read executor group"
+OPS_GROUP_GID="$(ops_group_gid)" || die "cannot provision dedicated ops executor group"
 mkdir -p "$YARD_ROOT"
 
 TMP_DIR="$(mktemp -d)"
@@ -122,6 +134,7 @@ services:
     group_add:
       - "${STATE_GID}"
       - "${READ_GROUP_GID}"
+      - "${OPS_GROUP_GID}"
     environment:
       YARD_WEB_HOST: "0.0.0.0"
       YARD_WEB_PORT: "8088"
@@ -131,6 +144,7 @@ services:
       YARD_WEB_CHECK_TIMEOUT_SECONDS: "5"
       YARD_WEB_CACHE_SECONDS: "15"
       YARD_WEB_READ_SOCKET: "/run/yard-web-read/read.sock"
+      YARD_WEB_OPS_SOCKET: "/run/yard-web-ops/ops.sock"
     volumes:
       - type: bind
         source: /etc/yard/projects
@@ -143,6 +157,11 @@ services:
       - type: bind
         source: /run/yard-web-read
         target: /run/yard-web-read
+        read_only: true
+      # Connecting to the socket needs no write access to the mount; the yard-web-ops group does it.
+      - type: bind
+        source: /run/yard-web-ops
+        target: /run/yard-web-ops
         read_only: true
     read_only: true
     tmpfs:
@@ -262,6 +281,11 @@ install -o root -g root -m 0644 "$TMP_COMPOSE" "$YARD_COMPOSE"
 install -o root -g root -m 0644 "${WEB_SOURCE}/yard-web-read.service" /etc/systemd/system/yard-web-read.service
 start_read_service
 wait_read_socket /run/yard-web-read/read.sock
+
+# The ops executor runs Docker, Git and backup commands; Web only gets its group-protected socket.
+install -o root -g root -m 0644 "${OPS_SOURCE}/yard-web-ops.service" /etc/systemd/system/yard-web-ops.service
+start_ops_service
+wait_ops_socket /run/yard-web-ops/ops.sock
 
 # The Caddyfile is bind-mounted as a single file. Replacing it with rename/install
 # changes the inode and leaves the running container attached to the old file.

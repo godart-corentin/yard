@@ -42,5 +42,12 @@ fi
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type d -exec chmod 0755 {} +
 "${SUDO[@]}" find /usr/local/share/yard/web-src -type f -exec chmod 0644 {} +
 
+"${SUDO[@]}" rm -rf /usr/local/share/yard/ops-src
+"${SUDO[@]}" cp -R "$ROOT_DIR/ops" /usr/local/share/yard/ops-src
+"${SUDO[@]}" chown -R root:root /usr/local/share/yard/ops-src
+"${SUDO[@]}" find /usr/local/share/yard/ops-src -type d -exec chmod 0755 {} +
+"${SUDO[@]}" find /usr/local/share/yard/ops-src -type f -exec chmod 0644 {} +
+
 echo "Yard installed to /usr/local/bin/yard"
 echo "Yard Web source installed to /usr/local/share/yard/web-src"
+echo "Yard Web ops executor files installed to /usr/local/share/yard/ops-src"
