@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
+use crate::jobs;
 use crate::{read_request, read_result, App, Config};
 
 const JSON: &str = "application/json; charset=utf-8";
@@ -29,6 +30,24 @@ pub fn router(app: Shared) -> Router {
         .route("/healthz", get(healthz).fallback(method_not_allowed))
         .route("/api/status", get(status).fallback(method_not_allowed))
         .route("/api/read", get(read).fallback(method_not_allowed))
+        .route(
+            "/api/jobs",
+            get(jobs::list_jobs)
+                .post(jobs::create_job)
+                .fallback(method_not_allowed),
+        )
+        .route(
+            "/api/jobs/{id}",
+            get(jobs::get_job).fallback(method_not_allowed),
+        )
+        .route(
+            "/api/jobs/{id}/output",
+            get(jobs::job_output).fallback(method_not_allowed),
+        )
+        .route(
+            "/api/logs/stream",
+            get(jobs::logs_stream).fallback(method_not_allowed),
+        )
         .route("/", static_route("index.html"))
         .route("/index.html", static_route("index.html"))
         .route("/styles.css", static_route("styles.css"))
@@ -73,7 +92,12 @@ async fn shutdown_signal() {
     }
 }
 
-fn respond(status: StatusCode, content_type: &str, cache: &str, body: Vec<u8>) -> Response {
+pub(crate) fn respond(
+    status: StatusCode,
+    content_type: &str,
+    cache: &str,
+    body: Vec<u8>,
+) -> Response {
     (
         status,
         [

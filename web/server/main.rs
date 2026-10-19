@@ -14,6 +14,7 @@ use serde_json::Value;
 
 mod api_types;
 mod http;
+mod jobs;
 
 #[derive(Clone)]
 struct Config {
@@ -26,6 +27,9 @@ struct Config {
     cache_duration: Duration,
     host_max_age_seconds: u64,
     read_socket: PathBuf,
+    ops_socket: PathBuf,
+    /// Shared secret the trusted reverse proxy sends; unset keeps Web read-only.
+    proxy_token: Option<String>,
 }
 
 impl Config {
@@ -46,6 +50,12 @@ impl Config {
                 "YARD_WEB_READ_SOCKET",
                 "/run/yard-web-read/read.sock",
             )),
+            ops_socket: PathBuf::from(env_value(
+                "YARD_WEB_OPS_SOCKET",
+                "/run/yard-web-ops/ops.sock",
+            )),
+            proxy_token: Some(env_value("YARD_WEB_PROXY_TOKEN", ""))
+                .filter(|value| !value.is_empty()),
         })
     }
 }
@@ -660,6 +670,7 @@ struct App {
     config: Config,
     client: Client,
     cache: Mutex<Cache>,
+    streams: jobs::Streams,
 }
 
 impl App {
@@ -676,6 +687,7 @@ impl App {
                 value: None,
                 valid_until: Instant::now(),
             }),
+            streams: jobs::Streams::default(),
         })
     }
 
@@ -1324,10 +1336,8 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
         }
     }
     let op = params.remove("op")?;
-    if op == "images" {
-        return params
-            .is_empty()
-            .then(|| serde_json::json!({"op": "images"}));
+    if matches!(op.as_str(), "images" | "images-prune-plan") {
+        return params.is_empty().then(|| serde_json::json!({"op": op}));
     }
     if !matches!(op.as_str(), "logs" | "restore-points" | "restore-log") {
         return None;
@@ -1352,10 +1362,7 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
             .then(|| serde_json::json!({"op": op, "project": project}));
     }
     let service = params.remove("service");
-    if service
-        .as_deref()
-        .is_some_and(|name| !selected.service_names.iter().any(|valid| valid == name))
-    {
+    if !valid_service(selected, service.as_deref()) {
         return None;
     }
     let tail = params
@@ -1367,20 +1374,28 @@ fn read_request(target: &str, config: &Config) -> Option<Value> {
         return None;
     }
     let since = params.remove("since");
-    if since.as_deref().is_some_and(|value| {
-        value.is_empty()
-            || value.len() > 40
-            || !value.bytes().all(|byte| {
+    if !valid_since(since.as_deref()) {
+        return None;
+    }
+    params.is_empty().then(|| serde_json::json!({"op": op, "project": project, "service": service, "tail": tail, "since": since}))
+}
+
+fn valid_service(project: &Project, service: Option<&str>) -> bool {
+    service.is_none_or(|name| project.service_names.iter().any(|valid| valid == name))
+}
+
+fn valid_since(since: Option<&str>) -> bool {
+    since.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 40
+            && value.bytes().all(|byte| {
                 byte.is_ascii_digit()
                     || matches!(
                         byte,
                         b'T' | b'Z' | b'+' | b'-' | b':' | b'.' | b's' | b'm' | b'h' | b'd'
                     )
             })
-    }) {
-        return None;
-    }
-    params.is_empty().then(|| serde_json::json!({"op": op, "project": project, "service": service, "tail": tail, "since": since}))
+    })
 }
 
 fn read_result(socket: &Path, request: &Value) -> Result<Value, u16> {
@@ -1671,6 +1686,8 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: socket,
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .unwrap();
         let mut payload = StatusPayload {
@@ -2030,6 +2047,8 @@ mod tests {
             cache_duration: Duration::from_secs(60),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         };
         let app = App::new(config).unwrap();
         assert_eq!(app.status().host.status, "unknown");
@@ -2142,6 +2161,8 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .unwrap();
         let app = Arc::new(app);
@@ -2191,6 +2212,8 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: dir.join("missing.sock"),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .map(Arc::new)
         .unwrap();
@@ -2269,6 +2292,8 @@ mod tests {
             cache_duration: Duration::from_secs(1),
             host_max_age_seconds: 300,
             read_socket: socket.clone(),
+            ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+            proxy_token: None,
         })
         .map(Arc::new)
         .unwrap();
@@ -2306,6 +2331,8 @@ mod tests {
                 cache_duration: Duration::from_secs(1),
                 host_max_age_seconds: 300,
                 read_socket: dir.join("missing.sock"),
+                ops_socket: PathBuf::from("/nonexistent/ops.sock"),
+                proxy_token: None,
             })
             .unwrap(),
         );
