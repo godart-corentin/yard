@@ -60,6 +60,7 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
         _ => return None,
     };
     if project.is_empty()
+        || project.starts_with('-')
         || project.len() > 64
         || !project
             .bytes()
@@ -77,7 +78,7 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     let configured = Project::load(project, projects, Path::new("/dev/null")).ok()?;
     if !matches!(request.op.as_str(), "logs" | "logs-follow") {
         return (request.service.is_none() && request.tail.is_none() && request.since.is_none())
-            .then(|| vec![request.op.clone(), project.to_owned()]);
+            .then(|| vec![request.op.clone(), "--".into(), project.to_owned()]);
     }
     let tail = request.tail.unwrap_or(200);
     if tail == 0
@@ -108,7 +109,6 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     }
     let mut args = vec![
         "logs".into(),
-        project.to_owned(),
         if request.op == "logs-follow" {
             "--follow"
         } else {
@@ -124,6 +124,8 @@ fn allowed(request: &ReadRequest, projects: &Path) -> Option<Vec<String>> {
     if let Some(since) = &request.since {
         args.extend(["--since".into(), since.clone()]);
     }
+    // The project is the only positional; `--` keeps it from ever being read as an option.
+    args.extend(["--".into(), project.to_owned()]);
     Some(args)
 }
 

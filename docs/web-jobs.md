@@ -33,7 +33,7 @@ offering the real prune.
 Argument rules (enforced by Web, then again by the executor):
 
 - `project`: required for project actions, **forbidden** for global actions. It must be
-  `[A-Za-z0-9_-]{1,64}`, a configured project, with a full manifest (not a URL-only monitor), and
+  `[A-Za-z0-9_-]{1,64}` not starting with `-`, a configured project, with a full manifest (not a URL-only monitor), and
   not the reserved name `host`.
 - `revision`: required for `restore` (must be one of the project's restore points), forbidden otherwise.
 - `confirm`: must be exactly `true` for `restore` and `images-prune` (these map to the
@@ -223,6 +223,9 @@ The executor trusts nothing from the request beyond what the allowlist accepts:
   jobs always run the same version as the executor, and `update.sh` restarts the unit.
 - `actor` is only an audit label supplied by the already-authenticated Web; it is re-validated
   (`[A-Za-z0-9._@-]{1,64}`) and recorded. The socket's file permissions are the real authorization.
+- Argument lists put every option first and the positionals after `--` (`deploy -- <project>`,
+  `restore --yes -- <project> <revision>`; the read executor does the same), and the CLI refuses a project name
+  starting with `-` even after `--`, so no request value can ever be parsed as an option.
 - Each job runs in its own process group with a wall-clock timeout (deploy 30 min, restore 30 min,
   backup 60 min, images-prune 10 min, host-collect 2 min); on timeout the group gets `SIGTERM`, then `SIGKILL` after 10 s, and the job is `failed`.
 - When the job's process exits the executor kills its process group, then waits at most 5 s for the output

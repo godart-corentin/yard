@@ -413,7 +413,7 @@ impl Executor {
     }
 
     fn project(&self, name: &str) -> std::result::Result<Project, String> {
-        if name == "host" || !valid_name(name, b"-_", 64) {
+        if name == "host" || !valid_name(name, b"-_", 64) || name.starts_with('-') {
             return Err("Invalid project".into());
         }
         let known = Project::list(&self.config.projects_dir)
@@ -488,6 +488,7 @@ impl Executor {
                     if action == Action::Backup && project.config.backup.is_none() {
                         return Err("Project has no backup command".into());
                     }
+                    // `--` ends the options: the name is never an option, whatever it contains.
                     argv.extend([
                         if action == Action::Deploy {
                             "deploy"
@@ -495,6 +496,7 @@ impl Executor {
                             "backup"
                         }
                         .to_owned(),
+                        "--".to_owned(),
                         name.to_owned(),
                     ]);
                 }
@@ -507,7 +509,7 @@ impl Executor {
                         return Err("Revision is not a restore point".into());
                     }
                     revision = Some(target.to_owned());
-                    argv.extend(["restore", name, target, "--yes"].map(String::from));
+                    argv.extend(["restore", "--yes", "--", name, target].map(String::from));
                 }
             }
         }
@@ -639,7 +641,7 @@ impl Executor {
         pipe: File,
         log: File,
         mut job: Job,
-        _guard: LockGuard,
+        guard: LockGuard,
     ) {
         let pgid = child.id() as i32;
         let written = Arc::new(AtomicU64::new(0));
@@ -730,6 +732,10 @@ impl Executor {
             ),
         };
         self.finish(&mut job, state, code, error);
+        // Free the project before the cleanup pass, so a client that saw the job end can start
+        // the next one at once. The history only grows when a job ends: enforce the caps now.
+        drop(guard);
+        self.retain();
     }
 
     fn finish(&self, job: &mut Job, state: State, code: Option<i32>, error: Option<String>) {
@@ -742,8 +748,6 @@ impl Executor {
             eprintln!("yard ops executor cannot persist job {}: {error}", job.id);
         }
         jobs::remove_pid(&self.jobs_dir, &job.id);
-        // The history only grows when a job ends, so this is when the caps are enforced.
-        self.retain();
     }
 }
 
@@ -849,9 +853,9 @@ mod tests {
                 fs::write(root.join(format!("{name}.sh")), body).unwrap();
             };
             // Project actions are routed by action name; the project picks the behaviour.
-            script("backup", "exec sh \"$(dirname \"$0\")/p-$6.sh\"\n");
-            script("deploy", "exec sh \"$(dirname \"$0\")/p-$6.sh\"\n");
-            script("restore", "echo restoring \"$6\" \"$7\" \"$8\"\n");
+            script("backup", "exec sh \"$(dirname \"$0\")/p-$7.sh\"\n");
+            script("deploy", "exec sh \"$(dirname \"$0\")/p-$7.sh\"\n");
+            script("restore", "echo restoring \"$8\" \"$9\" \"$6\"\n");
             script("host", "echo host; echo oops >&2\n");
             script("images", "echo \"$@\"\nsleep 0.3\n");
             script("p-ok", "echo out; echo err >&2\n");
@@ -1009,6 +1013,8 @@ mod tests {
             json!({"action": "deploy", "project": "host"}),
             json!({"action": "deploy", "project": "../ok"}),
             json!({"action": "deploy", "project": "ok;ls"}),
+            json!({"action": "deploy", "project": "-ok"}),
+            json!({"action": "backup", "project": "--help"}),
             json!({"action": "deploy", "project": "ok", "revision": "abc123"}),
             json!({"action": "backup", "project": "nobackup"}),
             json!({"action": "restore", "project": "ok", "confirm": true}),
@@ -1233,8 +1239,8 @@ mod tests {
         for _ in 0..4 {
             last = Fixture::id(&f.start(json!({"action": "backup", "project": "ok"})));
             f.wait(&last);
-            // The pass runs right after the job is persisted as finished.
-            thread::sleep(Duration::from_millis(300));
+            // Finish times have a one second resolution; keep the order of the jobs unambiguous.
+            thread::sleep(Duration::from_millis(1100));
         }
         let kept = fs::read_dir(f.jobs())
             .unwrap()

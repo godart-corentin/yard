@@ -242,7 +242,7 @@ fn backup_job_runs_the_real_cli_with_a_clean_environment() {
             .unwrap()
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(mode & 0o777, 0o640);
     }
     assert_eq!(done["output_bytes"], log.len());
     assert!(fixture.root.join("state/demo.json").exists());

@@ -132,6 +132,7 @@ pub fn valid_job_id(id: &str) -> bool {
 fn valid_project_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
+        && !name.starts_with('-')
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -1196,6 +1197,19 @@ mod tests {
             "started_at_unix": 2, "finished_at_unix": null, "exit_code": null,
             "output_bytes": 0, "error": null}})
         .to_string()
+    }
+
+    #[test]
+    fn project_names_cannot_start_with_a_dash() {
+        assert!(valid_project_name("demo-1_x"));
+        for bad in ["", "-demo", "--help", "a b", "../x"] {
+            assert!(!valid_project_name(bad), "{bad}");
+        }
+        let fixture = Fixture::new("dashname", Some(TOKEN));
+        for project in ["-demo", "--help"] {
+            let uri = format!("/api/read?op=logs&project={project}");
+            assert!(crate::read_request(&uri, &fixture.app.config).is_none());
+        }
     }
 
     #[test]

@@ -237,7 +237,7 @@ The `host` field contains `status`, `age_seconds`, and a sanitized `snapshot` wi
 thresholds and the statuses computed by the CLI. Web does not recompute warnings. The host view becomes
 `Unknown` when the snapshot is missing, unreadable, invalid, from an unknown version, or older than 300
 seconds (`YARD_WEB_HOST_MAX_AGE_SECONDS`). A configured project with no Compose containers yet is
-`Unknown`; only a stopped container is `Critical`. The project name `host` is reserved.
+`Unknown`; only a stopped container is `Critical`. The project name `host` is reserved, and a name starting with `-` is refused everywhere (CLI, Web, executors; `yard list` skips such a manifest).
 
 Reads show the actual bounded CLI output or an explicit unavailable state. `400` means refused, `503`
 the executor could not answer, `502` a command failure, timeout, output limit or invalid reply. The UI
